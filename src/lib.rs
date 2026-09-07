@@ -6,3 +6,4 @@ pub mod google;
 pub mod sync;
 pub mod text;
 pub mod theme;
+pub mod ui;
