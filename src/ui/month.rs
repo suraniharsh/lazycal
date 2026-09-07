@@ -86,14 +86,19 @@ fn draw_day(
         base_fg
     };
 
-    let mut base = Style::default().fg(base_fg);
-    let mut day_style = Style::default().fg(day_fg);
-    if date == app.selected {
-        base = base.bg(theme::SELECTED_BG);
-        day_style = day_style.bg(theme::SELECTED_BG);
-    }
+    let base = Style::default().fg(base_fg);
+    // Only the date carries the highlight. Filling a whole cell with a
+    // palette colour drowns out the events inside it.
+    let day_style = if date == app.selected {
+        Style::default()
+            .fg(theme::contrasting_fg(theme::SELECTED_BG))
+            .bg(theme::SELECTED_BG)
+    } else {
+        Style::default().fg(day_fg)
+    };
 
-    let width = area.width as usize;
+    // A column of gutter, so a long title can't run into the next day.
+    let width = (area.width as usize).saturating_sub(1);
     let mut lines = vec![Line::from(Span::styled(date.day().to_string(), day_style))];
     if let Some(events) = events {
         // One line of the cell is spent on the date itself.

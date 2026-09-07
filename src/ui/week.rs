@@ -55,12 +55,15 @@ fn draw_day(
     } else {
         theme::TEXT
     };
-    let mut base = Style::default().fg(theme::TEXT);
-    let mut header_style = Style::default().fg(header_fg);
-    if date == app.selected {
-        base = base.bg(theme::SELECTED_BG);
-        header_style = header_style.bg(theme::SELECTED_BG);
-    }
+    let base = Style::default().fg(theme::TEXT);
+    // Only the header carries the highlight, so the events stay readable.
+    let header_style = if date == app.selected {
+        Style::default()
+            .fg(theme::contrasting_fg(theme::SELECTED_BG))
+            .bg(theme::SELECTED_BG)
+    } else {
+        Style::default().fg(header_fg)
+    };
 
     let weekday = WEEKDAYS_LONG[date.weekday().num_days_from_sunday() as usize];
     let header = format!("{weekday} {}", date.day());
@@ -68,7 +71,9 @@ fn draw_day(
 
     if let Some(events) = events {
         let capacity = (area.height as usize).saturating_sub(1);
-        lines.extend(event_lines(events, area.width as usize, capacity, base));
+        // A column of gutter, so a long title can't run into the next day.
+        let width = (area.width as usize).saturating_sub(1);
+        lines.extend(event_lines(events, width, capacity, base));
     }
 
     frame.render_widget(Paragraph::new(lines).style(base), area);
