@@ -1,0 +1,14 @@
+/target
+
+# Credentials and local state must never be committed.
+client_secret*.json
+tokencache.json
+*.db
+*.log
+
+# Editor / OS noise
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
