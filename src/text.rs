@@ -1,4 +1,29 @@
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
+
+/// Requests emoji presentation of the preceding character.
+const VARIATION_SELECTOR_16: char = '\u{fe0f}';
+
+/// Width of `s` in terminal columns.
+///
+/// `unicode-width` reports the base character's own width, but a following
+/// U+FE0F asks for emoji presentation, which terminals draw two columns wide
+/// — `⏱️` measures as 1 and occupies 2. Undercounting shifts everything after
+/// it, so text bleeds into the next cell and the frame diff leaves stale
+/// glyphs behind. Counting those sequences as 2 errs toward a spare column
+/// instead.
+pub fn display_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let mut unit = ch.width().unwrap_or(0);
+        if chars.peek() == Some(&VARIATION_SELECTOR_16) {
+            chars.next();
+            unit = unit.max(2);
+        }
+        width += unit;
+    }
+    width
+}
 
 /// Fits `s` into `max_width` display columns, appending an ellipsis if it had
 /// to be cut.
@@ -13,20 +38,30 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
     }
 
     let cleaned = sanitize(s);
-    if cleaned.width() <= max_width {
+    if display_width(&cleaned) <= max_width {
         return cleaned;
     }
 
     let budget = max_width - 1;
     let mut out = String::with_capacity(cleaned.len());
     let mut width = 0;
-    for ch in cleaned.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if width + ch_width > budget {
+    let mut chars = cleaned.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let emoji_presentation = chars.peek() == Some(&VARIATION_SELECTOR_16);
+        let mut unit = ch.width().unwrap_or(0);
+        if emoji_presentation {
+            unit = unit.max(2);
+        }
+        if width + unit > budget {
             break;
         }
+
         out.push(ch);
-        width += ch_width;
+        if emoji_presentation {
+            chars.next();
+            out.push(VARIATION_SELECTOR_16);
+        }
+        width += unit;
     }
     out.push('…');
     out
@@ -35,7 +70,7 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
 /// Pads to `width` columns so a styled span (an all-day event's colored bar,
 /// say) fills its cell instead of only the glyphs it contains.
 pub fn pad_to_width(s: &str, width: usize) -> String {
-    let deficit = width.saturating_sub(s.width());
+    let deficit = width.saturating_sub(display_width(s));
     if deficit == 0 {
         s.to_owned()
     } else {
@@ -69,14 +104,14 @@ mod tests {
         // The ellipsis counts toward max_width, so nine characters plus it.
         let out = truncate_to_width("Implementation review", 10);
         assert_eq!(out, "Implement…");
-        assert_eq!(out.width(), 10);
+        assert_eq!(display_width(&out), 10);
     }
 
     #[test]
     fn never_exceeds_the_requested_width() {
         for width in 1..12 {
             let out = truncate_to_width("Quarterly planning meeting", width);
-            assert!(out.width() <= width, "{out:?} exceeded {width}");
+            assert!(display_width(&out) <= width, "{out:?} exceeded {width}");
         }
     }
 
@@ -88,19 +123,49 @@ mod tests {
     #[test]
     fn counts_wide_characters_by_column() {
         // Each CJK character occupies two columns.
-        assert_eq!("会議".width(), 4);
-        assert!(truncate_to_width("会議会議会議", 5).width() <= 5);
+        assert_eq!(display_width("会議"), 4);
+        assert!(display_width(&truncate_to_width("会議会議会議", 5)) <= 5);
     }
 
     #[test]
     fn does_not_split_multi_byte_characters() {
         let out = truncate_to_width("🏁 FORMULA 1 Grand Prix", 8);
-        assert!(out.width() <= 8);
+        assert!(display_width(&out) <= 8);
         assert!(out.ends_with('…'));
         // Round-tripping proves no character was cut in half.
         assert_eq!(
             out,
             String::from_utf8(out.clone().into_bytes()).expect("valid utf-8")
+        );
+    }
+
+    #[test]
+    fn counts_emoji_presentation_sequences_as_two_columns() {
+        // U+23F1 alone measures 1, but with U+FE0F terminals draw it wide.
+        assert_eq!(display_width("\u{23f1}"), 1);
+        assert_eq!(display_width("\u{23f1}\u{fe0f}"), 2);
+        // Already-wide emoji are unaffected.
+        assert_eq!(display_width("\u{1f3c1}"), 2);
+    }
+
+    #[test]
+    fn an_emoji_title_stays_inside_its_cell() {
+        // The real title that used to bleed into the next day's column.
+        let title = "\u{23f1}\u{fe0f} FORMULA 1 QATAR AIRWAYS - Qualifying";
+        for width in 1..30 {
+            let out = truncate_to_width(title, width);
+            assert!(display_width(&out) <= width, "{out:?} exceeded {width}");
+        }
+    }
+
+    #[test]
+    fn keeps_the_variation_selector_with_its_base_character() {
+        let out = truncate_to_width("\u{23f1}\u{fe0f} Qualifying session", 6);
+        // Either both are kept or neither, never a lone selector.
+        assert_eq!(
+            out.contains('\u{fe0f}'),
+            out.contains('\u{23f1}'),
+            "{out:?} split an emoji sequence"
         );
     }
 
