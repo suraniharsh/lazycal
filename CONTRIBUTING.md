@@ -5,7 +5,7 @@ welcome.
 
 ## Getting set up
 
-You need Rust 1.85 or newer and a C compiler (SQLite is built from source via
+You need Rust 1.88 or newer and a C compiler (SQLite is built from source via
 `rusqlite`'s `bundled` feature).
 
 ```bash

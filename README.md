@@ -35,7 +35,7 @@ email — consider using a throwaway account or blurring sensitive rows. -->
 
 ## Install
 
-Requires Rust 1.85 or newer (2024 edition).
+Requires Rust 1.88 or newer (2024 edition).
 
 ```bash
 git clone https://github.com/suraniharsh/lazycal.git

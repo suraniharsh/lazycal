@@ -2,7 +2,7 @@
 name = "lazycal"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["harsh surani <harshsurani00@gmail.com>"]
 description = "A fast terminal UI for Google Calendar, backed by an offline SQLite cache"
 repository = "https://github.com/suraniharsh/lazycal"

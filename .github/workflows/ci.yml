@@ -31,10 +31,23 @@ jobs:
         run: cargo test --all-targets
 
   msrv:
-    name: build on MSRV (1.85)
+    name: build on MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
+
+      # Taken from Cargo.toml so the pin can't drift from the declared MSRV,
+      # and so there's no version tag here for Dependabot to "upgrade".
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
+          echo "Declared MSRV: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-targets
