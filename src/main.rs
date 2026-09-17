@@ -2,7 +2,8 @@ use std::io::{self, Stdout};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
+use clap::Parser;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -19,12 +20,35 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 /// How long to block on input before looping to check on the background sync.
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+#[derive(Parser)]
+#[command(
+    name = "lazycal",
+    version,
+    about = "A fast, offline-first calendar client for the terminal"
+)]
+struct Cli {
+    /// Sync and exit without opening the interface, for use from cron
+    #[arg(long)]
+    sync: bool,
+
+    /// Show only what's already cached, without syncing
+    #[arg(long, conflicts_with = "sync")]
+    offline: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
     let paths = config::resolve()?;
     init_logging(&paths);
 
-    if !paths.client_secret.exists() {
+    if cli.sync {
+        return sync_and_exit(&paths).await;
+    }
+
+    if cli.offline {
+        // Nothing to announce; the footer reports the offline status.
+    } else if !paths.client_secret.exists() {
         eprintln!(
             "lazycal: no Google credentials at {}.\n\
              Showing cached events only — see the setup steps in the README.",
@@ -35,17 +59,38 @@ async fn main() -> Result<()> {
         // screen would swallow, so first-time authorization has to happen
         // before the TUI takes over the terminal.
         println!("lazycal: first run, authorizing with Google…");
-        match perform_sync(&paths).await {
+        match perform_sync(&paths, google::Interactive::Yes).await {
             Ok(report) => println!("lazycal: synced {} calendar(s).", report.synced),
             Err(err) => eprintln!("lazycal: initial sync failed: {err:#}"),
         }
     }
 
     let mut terminal = init_terminal()?;
-    let outcome = run(&mut terminal, &paths);
+    let outcome = run(&mut terminal, &paths, cli.offline);
     let restored = restore_terminal(&mut terminal);
     // Report the run's failure ahead of any problem restoring the terminal.
     outcome.and(restored)
+}
+
+/// Syncs without opening the interface, reporting on stdout and exiting
+/// non-zero if anything failed so a scheduler notices.
+async fn sync_and_exit(paths: &config::Paths) -> Result<()> {
+    if !paths.client_secret.exists() {
+        bail!(
+            "no Google credentials at {} — see the setup steps in the README",
+            paths.client_secret.display()
+        );
+    }
+
+    let report = perform_sync(paths, google::Interactive::No).await?;
+    println!("synced {} calendar(s)", report.synced);
+    if !report.is_complete() {
+        bail!(
+            "these calendars failed to sync: {}",
+            report.failed.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn init_terminal() -> Result<Term> {
@@ -90,12 +135,14 @@ fn init_logging(paths: &config::Paths) {
         .try_init();
 }
 
-fn run(terminal: &mut Term, paths: &config::Paths) -> Result<()> {
+fn run(terminal: &mut Term, paths: &config::Paths, offline: bool) -> Result<()> {
     // Renders from whatever is cached so startup never waits on the network.
     let mut app = App::open(&paths.database)?;
-    let configured = paths.client_secret.exists();
+    let configured = !offline && paths.client_secret.exists();
     if configured {
         spawn_background_sync(paths.clone(), app.sync_status_handle());
+    } else if offline {
+        app.set_sync_status(SyncStatus::Offline);
     } else {
         app.set_sync_status(SyncStatus::NotConfigured);
     }
@@ -141,7 +188,7 @@ fn run(terminal: &mut Term, paths: &config::Paths) -> Result<()> {
 
 fn spawn_background_sync(paths: config::Paths, status: Arc<Mutex<SyncStatus>>) {
     tokio::spawn(async move {
-        let next = match perform_sync(&paths).await {
+        let next = match perform_sync(&paths, google::Interactive::No).await {
             Ok(report) if report.is_complete() => SyncStatus::Synced,
             Ok(report) => {
                 tracing::warn!(
@@ -149,6 +196,12 @@ fn spawn_background_sync(paths: config::Paths, status: Arc<Mutex<SyncStatus>>) {
                     report.failed.join(", ")
                 );
                 SyncStatus::Partial
+            }
+            // Google expires refresh tokens weekly while the OAuth app is in
+            // "Testing", so say so rather than reporting a generic failure.
+            Err(err) if google::needs_reauthorization(&err) => {
+                tracing::warn!("sign-in needed: {err:#}");
+                SyncStatus::NeedsAuth
             }
             Err(err) => {
                 tracing::error!("sync failed: {err:#}");
@@ -159,8 +212,11 @@ fn spawn_background_sync(paths: config::Paths, status: Arc<Mutex<SyncStatus>>) {
     });
 }
 
-async fn perform_sync(paths: &config::Paths) -> Result<SyncReport> {
-    let hub = google::connect(&paths.client_secret, &paths.token_cache).await?;
+async fn perform_sync(
+    paths: &config::Paths,
+    interactive: google::Interactive,
+) -> Result<SyncReport> {
+    let hub = google::connect(&paths.client_secret, &paths.token_cache, interactive).await?;
     // A connection of its own, so a slow sync write never blocks the UI.
     let conn = db::open_shared(&paths.database)?;
     sync::sync_all(&hub, &conn).await

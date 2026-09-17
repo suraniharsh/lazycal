@@ -10,7 +10,12 @@ async fn main() -> Result<()> {
     let paths = config::resolve()?;
     println!("database: {}", paths.database.display());
 
-    let hub = google::connect(&paths.client_secret, &paths.token_cache).await?;
+    let hub = google::connect(
+        &paths.client_secret,
+        &paths.token_cache,
+        google::Interactive::Yes,
+    )
+    .await?;
     let conn = db::open_shared(&paths.database)?;
 
     let report = sync::sync_all(&hub, &conn).await?;

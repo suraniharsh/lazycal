@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--sync` to sync and exit without opening the interface, `--offline` to show
+  only the cache, plus `--help` and `--version`.
+- A `sign-in needed` status, since Google expires refresh tokens weekly while
+  an OAuth app's publishing status is "Testing".
+
+### Fixed
+
+- `--sync` no longer waits forever on a consent prompt nobody can answer; an
+  unattended run fails fast with a non-zero exit instead.
+- Event titles containing emoji presentation sequences (`⏱️`) no longer
+  overflow into the next day's column.
+- The selected day highlights only its date rather than filling the whole cell.
+- The declared MSRV is 1.88, which the dependency tree actually requires.
+
 ## [0.1.0] - 2026-09-08
 
 Initial release.

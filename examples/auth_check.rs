@@ -11,7 +11,12 @@ async fn main() -> Result<()> {
     println!("client secret: {}", paths.client_secret.display());
     println!("token cache:   {}", paths.token_cache.display());
 
-    let hub = google::connect(&paths.client_secret, &paths.token_cache).await?;
+    let hub = google::connect(
+        &paths.client_secret,
+        &paths.token_cache,
+        google::Interactive::Yes,
+    )
+    .await?;
     let calendars = google::list_calendars(&hub).await?;
 
     println!("\n{} calendar(s):", calendars.len());

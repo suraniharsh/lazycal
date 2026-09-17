@@ -1,10 +1,13 @@
 # lazycal
 
-A fast terminal UI for Google Calendar, backed by an offline SQLite cache.
+A fast, offline-first calendar client for the terminal.
 
-`lazycal` starts instantly by rendering from its local cache, then refreshes from
-Google in the background. Month, week, day and agenda views, per-calendar
-visibility toggles, and colors taken from your own Google Calendar setup.
+`lazycal` starts instantly by rendering from its local cache, then refreshes in
+the background. Month, week, day and agenda views, per-calendar visibility
+toggles, and colors taken from your own calendar setup.
+
+Google Calendar is the provider supported today; the sync engine is built to
+take others.
 
 [![CI](https://github.com/suraniharsh/lazycal/actions/workflows/ci.yml/badge.svg)](https://github.com/suraniharsh/lazycal/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
@@ -64,8 +67,8 @@ one once. It is free and takes a few minutes.
 3. **Configure the OAuth consent screen**
    ([here](https://console.cloud.google.com/apis/credentials/consent)):
    choose **External**, fill in an app name and your email, and add your own
-   Google account under **Test users**. Leaving the app in "Testing" is fine for
-   personal use.
+   Google account under **Test users**. See the note below about publishing
+   status before you leave it on "Testing".
 4. **Create the credential**
    ([here](https://console.cloud.google.com/apis/credentials)):
    **Create Credentials → OAuth client ID**, application type **Desktop app**,
@@ -80,6 +83,32 @@ one once. It is free and takes a few minutes.
 
 On first run a browser window opens for consent. The resulting token is cached,
 so later runs need no interaction.
+
+> **Testing status expires your sign-in every 7 days.** While the OAuth consent
+> screen's publishing status is **Testing**, Google issues refresh tokens that
+> stop working after a week, and `lazycal` will show `⚠ sign-in needed` until
+> you run it interactively again. To avoid that, set the publishing status to
+> **In production** on the consent screen. Calendar counts as a sensitive
+> scope, so Google may show an "unverified app" warning you have to click
+> through (fine for personal use) or ask you to submit the app for
+> verification.
+
+## Usage
+
+```
+lazycal              # open the interface
+lazycal --sync       # sync and exit, for cron
+lazycal --offline    # show the cache without syncing
+lazycal --help
+```
+
+`--sync` never prompts for consent, so it fails fast with a non-zero exit
+instead of waiting on a browser when your sign-in has expired — which makes it
+safe to schedule:
+
+```cron
+*/30 * * * * /usr/local/bin/lazycal --sync >/dev/null
+```
 
 ## Keys
 
@@ -163,7 +192,7 @@ inspect the layout without a real terminal.
   automatically as that horizon approaches, but events further out than it
   aren't fetched.
 - A sync runs at startup and on demand with `r`; there's no automatic periodic
-  re-sync while the app is open.
+  re-sync while the app is open (schedule `--sync` if you want one).
 - No scrolling: views that overflow show a `+N more` count instead.
 
 ## License

@@ -119,6 +119,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 fn status_line(app: &App) -> Line<'static> {
     let (text, color) = match app.sync_status() {
         SyncStatus::NotConfigured => ("\u{26a0} no credentials", theme::WARN),
+        SyncStatus::Offline => ("\u{2298} offline", theme::MUTED),
+        SyncStatus::NeedsAuth => ("\u{26a0} sign-in needed", theme::WARN),
         SyncStatus::Syncing => ("\u{27f3} syncing…", theme::MUTED),
         SyncStatus::Synced => ("\u{2713} synced", theme::SUCCESS),
         SyncStatus::Partial => ("\u{26a0} partly synced", theme::WARN),

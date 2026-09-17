@@ -24,6 +24,10 @@ pub enum View {
 pub enum SyncStatus {
     /// No `client_secret.json`, so no sync was attempted.
     NotConfigured,
+    /// Started with `--offline`, so no sync was attempted.
+    Offline,
+    /// The cached credentials expired and consent has to be given again.
+    NeedsAuth,
     Syncing,
     Synced,
     /// Some calendars synced and others failed; details are in the log.
