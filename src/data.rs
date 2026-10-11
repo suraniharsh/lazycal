@@ -95,10 +95,10 @@ fn local_date(timestamp: i64) -> Option<NaiveDate> {
 }
 
 fn color_for(row: &EventRow, calendar_colors: &HashMap<String, Color>) -> Color {
-    // An event's own colorId wins over its calendar's default color.
-    row.color_id
+    // An event's own colour wins over its calendar's default.
+    row.color
         .as_deref()
-        .and_then(theme::event_color)
+        .and_then(theme::parse_hex)
         .or_else(|| calendar_colors.get(&row.calendar_id).copied())
         .unwrap_or_else(|| theme::fallback_color(&row.calendar_id))
 }
@@ -133,7 +133,7 @@ mod tests {
             start_date: Some(start),
             end_date: Some(end),
             all_day: true,
-            color_id: None,
+            color: None,
         }
     }
 
@@ -146,7 +146,7 @@ mod tests {
             start_date: None,
             end_date: None,
             all_day: false,
-            color_id: None,
+            color: None,
         }
     }
 
@@ -306,13 +306,11 @@ mod tests {
         colors.insert("cal-1".to_owned(), Color::Rgb(1, 2, 3));
 
         let mut row = all_day("Recolored", day, date(2026, 8, 27));
-        row.color_id = Some("11".into());
+        // Providers resolve their own palettes before storage.
+        row.color = Some("#d60000".to_owned());
         let buckets = bucket_by_date(&[row], &colors, date(2026, 8, 20), date(2026, 9, 1));
 
-        assert_eq!(
-            buckets[&day][0].color,
-            theme::event_color("11").expect("known color id")
-        );
+        assert_eq!(buckets[&day][0].color, Color::Rgb(0xd6, 0x00, 0x00));
     }
 
     #[test]

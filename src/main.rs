@@ -216,8 +216,10 @@ async fn perform_sync(
     paths: &config::Paths,
     interactive: google::Interactive,
 ) -> Result<SyncReport> {
-    let hub = google::connect(&paths.client_secret, &paths.token_cache, interactive).await?;
+    let provider =
+        google::GoogleProvider::connect(&paths.client_secret, &paths.token_cache, interactive)
+            .await?;
     // A connection of its own, so a slow sync write never blocks the UI.
     let conn = db::open_shared(&paths.database)?;
-    sync::sync_all(&hub, &conn).await
+    sync::sync_all(&provider, &conn).await
 }

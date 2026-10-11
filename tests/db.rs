@@ -1,9 +1,9 @@
 //! Integration tests for the SQLite cache layer.
 
 use chrono::{NaiveDate, TimeZone, Utc};
-use google_calendar3::api::{Event, EventDateTime};
 use lazycal::db::calendars::SyncState;
 use lazycal::db::{self, calendars, events, schema};
+use lazycal::provider::{Change, EventStatus, EventTime, ProviderEvent};
 use rusqlite::Connection;
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -27,37 +27,31 @@ fn columns(conn: &Connection, table: &str) -> Vec<String> {
         .expect("collect columns")
 }
 
-fn all_day_event(id: &str, summary: &str, start: NaiveDate, end: NaiveDate) -> Event {
-    Event {
-        id: Some(id.to_owned()),
-        summary: Some(summary.to_owned()),
-        start: Some(EventDateTime {
-            date: Some(start),
-            ..Default::default()
-        }),
-        end: Some(EventDateTime {
-            date: Some(end),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
+fn upsert(event: ProviderEvent) -> Change {
+    Change::Upsert(Box::new(event))
 }
 
-fn timed_event(id: &str, summary: &str, start: NaiveDate, hour: u32) -> Event {
+fn all_day_event(id: &str, summary: &str, start: NaiveDate, end: NaiveDate) -> Change {
+    upsert(ProviderEvent {
+        id: id.to_owned(),
+        summary: summary.to_owned(),
+        start: EventTime::Date(start),
+        end: EventTime::Date(end),
+        status: EventStatus::Confirmed,
+        color: None,
+    })
+}
+
+fn timed_event(id: &str, summary: &str, start: NaiveDate, hour: u32) -> Change {
     let at = |h: u32| Utc.from_utc_datetime(&start.and_hms_opt(h, 0, 0).expect("valid time"));
-    Event {
-        id: Some(id.to_owned()),
-        summary: Some(summary.to_owned()),
-        start: Some(EventDateTime {
-            date_time: Some(at(hour)),
-            ..Default::default()
-        }),
-        end: Some(EventDateTime {
-            date_time: Some(at(hour + 1)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
+    upsert(ProviderEvent {
+        id: id.to_owned(),
+        summary: summary.to_owned(),
+        start: EventTime::Instant(at(hour)),
+        end: EventTime::Instant(at(hour + 1)),
+        status: EventStatus::Confirmed,
+        color: None,
+    })
 }
 
 #[test]
@@ -278,7 +272,7 @@ fn delete_calendar_also_removes_its_events() {
 }
 
 #[test]
-fn apply_upserts_then_deletes_a_cancelled_event() {
+fn apply_upserts_then_applies_a_tombstone() {
     let conn = memory_db();
     let event = all_day_event("e1", "Standup", date(2026, 8, 26), date(2026, 8, 27));
 
@@ -287,48 +281,38 @@ fn apply_upserts_then_deletes_a_cancelled_event() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].summary, "Standup");
 
-    // Incremental sync reports a deletion as a cancelled event, not an omission.
-    let cancelled = Event {
-        status: Some("cancelled".to_owned()),
-        ..event
+    // Incremental sync reports a removal as a tombstone, not an omission.
+    let tombstone = Change::Delete {
+        id: "e1".to_owned(),
     };
-    events::apply(&conn, "cal-1", &cancelled).expect("cancel");
+    events::apply(&conn, "cal-1", &tombstone).expect("delete");
 
     let rows = events::events_between(&conn, date(2026, 8, 26), date(2026, 8, 27)).expect("query");
     assert!(
         rows.is_empty(),
-        "cancelled events are removed from the cache"
+        "a tombstone removes the event from the cache"
     );
 }
 
 #[test]
-fn apply_ignores_an_event_without_an_id() {
+fn apply_records_a_resolved_event_color() {
     let conn = memory_db();
-    let event = Event {
-        summary: Some("No id".to_owned()),
-        ..Default::default()
-    };
-
-    events::apply(&conn, "cal-1", &event).expect("apply");
-
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
-        .expect("count");
-    assert_eq!(count, 0);
-}
-
-#[test]
-fn apply_records_a_per_event_color_override() {
-    let conn = memory_db();
-    let event = Event {
-        color_id: Some("11".to_owned()),
-        ..all_day_event("e1", "Tomato", date(2026, 8, 26), date(2026, 8, 27))
-    };
+    let event = upsert(ProviderEvent {
+        color: Some("#d60000".to_owned()),
+        ..ProviderEvent {
+            id: "e1".to_owned(),
+            summary: "Tomato".to_owned(),
+            start: EventTime::Date(date(2026, 8, 26)),
+            end: EventTime::Date(date(2026, 8, 27)),
+            status: EventStatus::Confirmed,
+            color: None,
+        }
+    });
 
     events::apply(&conn, "cal-1", &event).expect("apply");
 
     let rows = events::events_between(&conn, date(2026, 8, 26), date(2026, 8, 27)).expect("query");
-    assert_eq!(rows[0].color_id.as_deref(), Some("11"));
+    assert_eq!(rows[0].color.as_deref(), Some("#d60000"));
 }
 
 #[test]

@@ -52,26 +52,6 @@ pub fn calendar_color(id: &str, background_color: Option<&str>) -> Color {
         .unwrap_or_else(|| fallback_color(id))
 }
 
-/// Google's fixed event palette (`colorId` 1-11), used when an event
-/// overrides its calendar's color.
-pub fn event_color(color_id: &str) -> Option<Color> {
-    let hex = match color_id {
-        "1" => "#7986cb",  // Lavender
-        "2" => "#33b679",  // Sage
-        "3" => "#8e24aa",  // Grape
-        "4" => "#e67c73",  // Flamingo
-        "5" => "#f6bf26",  // Banana
-        "6" => "#f4511e",  // Tangerine
-        "7" => "#039be5",  // Peacock
-        "8" => "#616161",  // Graphite
-        "9" => "#3f51b5",  // Blueberry
-        "10" => "#0b8043", // Basil
-        "11" => "#d60000", // Tomato
-        _ => return None,
-    };
-    parse_hex(hex)
-}
-
 /// Black or white text, whichever stays legible on `background`.
 pub fn contrasting_fg(background: Color) -> Color {
     if let Color::Rgb(r, g, b) = background {
@@ -135,14 +115,6 @@ mod tests {
             calendar_color("cal-1", Some("nonsense")),
             fallback_color("cal-1")
         );
-    }
-
-    #[test]
-    fn maps_googles_event_color_ids() {
-        assert_eq!(event_color("11"), Some(Color::Rgb(0xd6, 0x00, 0x00)));
-        assert_eq!(event_color("1"), Some(Color::Rgb(0x79, 0x86, 0xcb)));
-        assert_eq!(event_color("12"), None);
-        assert_eq!(event_color(""), None);
     }
 
     #[test]

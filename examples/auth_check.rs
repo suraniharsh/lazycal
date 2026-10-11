@@ -3,6 +3,7 @@
 //! Run with: cargo run --example auth_check
 
 use anyhow::Result;
+use lazycal::provider::CalendarProvider;
 use lazycal::{config, google};
 
 #[tokio::main]
@@ -11,22 +12,22 @@ async fn main() -> Result<()> {
     println!("client secret: {}", paths.client_secret.display());
     println!("token cache:   {}", paths.token_cache.display());
 
-    let hub = google::connect(
+    let provider = google::GoogleProvider::connect(
         &paths.client_secret,
         &paths.token_cache,
         google::Interactive::Yes,
     )
     .await?;
-    let calendars = google::list_calendars(&hub).await?;
+    let calendars = provider.list_calendars().await?;
 
     println!("\n{} calendar(s):", calendars.len());
     for cal in &calendars {
         println!(
-            "  - {} (id: {}, selected: {:?}, primary: {:?})",
-            cal.summary.as_deref().unwrap_or("<no summary>"),
-            cal.id.as_deref().unwrap_or("<no id>"),
-            cal.selected,
-            cal.primary,
+            "  - {} (id: {}, color: {}, primary: {})",
+            cal.name,
+            cal.id,
+            cal.color.as_deref().unwrap_or("-"),
+            cal.is_primary,
         );
     }
 

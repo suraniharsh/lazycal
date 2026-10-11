@@ -1,7 +1,8 @@
 use anyhow::Result;
 use chrono::{Days, NaiveDate, TimeZone, Utc};
-use google_calendar3::api::Event;
 use rusqlite::{Connection, params};
+
+use crate::provider::{Change, EventStatus, EventTime};
 
 pub struct EventRow {
     pub calendar_id: String,
@@ -11,51 +12,48 @@ pub struct EventRow {
     pub start_date: Option<NaiveDate>,
     pub end_date: Option<NaiveDate>,
     pub all_day: bool,
-    /// Google's per-event color override (`colorId`), which takes precedence
-    /// over the calendar's own color.
-    pub color_id: Option<String>,
+    /// Resolved `#rrggbb` when the event overrides its calendar's colour.
+    pub color: Option<String>,
 }
 
-/// Upserts a synced event, or deletes it locally if Google reports it
-/// cancelled — incremental sync reports deletions that way rather than by
-/// omitting the event.
-pub fn apply(conn: &Connection, calendar_id: &str, event: &Event) -> Result<()> {
-    let Some(id) = event.id.as_deref() else {
-        return Ok(());
+/// Applies one synced change: an upsert, or a delete for a tombstone.
+pub fn apply(conn: &Connection, calendar_id: &str, change: &Change) -> Result<()> {
+    let event = match change {
+        Change::Delete { id } => {
+            conn.execute(
+                "DELETE FROM events WHERE calendar_id = ?1 AND id = ?2",
+                params![calendar_id, id],
+            )?;
+            return Ok(());
+        }
+        Change::Upsert(event) => event,
     };
 
-    let status = event.status.as_deref().unwrap_or("confirmed");
-    if status == "cancelled" {
-        conn.execute(
-            "DELETE FROM events WHERE calendar_id = ?1 AND id = ?2",
-            params![calendar_id, id],
-        )?;
-        return Ok(());
-    }
+    // The provider guarantees start and end are the same variant.
+    let (start_utc, end_utc, start_date, end_date, all_day) = match (event.start, event.end) {
+        (EventTime::Date(from), EventTime::Date(to)) => (None, None, Some(from), Some(to), true),
+        (EventTime::Instant(from), EventTime::Instant(to)) => (
+            Some(from.timestamp()),
+            Some(to.timestamp()),
+            None,
+            None,
+            false,
+        ),
+        // Mismatched variants would be a provider bug; skip rather than store
+        // a row no window could ever match.
+        _ => {
+            tracing::warn!(
+                "ignoring event {} with mismatched start/end kinds",
+                event.id
+            );
+            return Ok(());
+        }
+    };
 
-    let summary = event.summary.as_deref().unwrap_or("(no title)");
-    let start = event.start.as_ref();
-    let end = event.end.as_ref();
-    let all_day = start.and_then(|slot| slot.date).is_some();
-
-    let start_utc = start
-        .and_then(|slot| slot.date_time)
-        .map(|at| at.timestamp());
-    let start_date = start.and_then(|slot| slot.date);
-
-    // Ranges are queried half-open, so an event whose end is missing or not
-    // after its start would never match any window. Google documents that it
-    // always sends an end, but synthesising one keeps a malformed event
-    // visible instead of silently dropping it.
-    let end_utc = end
-        .and_then(|slot| slot.date_time)
-        .map(|at| at.timestamp())
-        .filter(|end| start_utc.is_none_or(|start| *end > start))
-        .or(start_utc);
-    let end_date = end
-        .and_then(|slot| slot.date)
-        .filter(|end| start_date.is_none_or(|start| *end > start))
-        .or_else(|| start_date.and_then(|start| start.checked_add_days(Days::new(1))));
+    let status = match event.status {
+        EventStatus::Confirmed => "confirmed",
+        EventStatus::Tentative => "tentative",
+    };
 
     conn.execute(
         "INSERT INTO events (
@@ -74,15 +72,15 @@ pub fn apply(conn: &Connection, calendar_id: &str, event: &Event) -> Result<()> 
              color_id = excluded.color_id",
         params![
             calendar_id,
-            id,
-            summary,
+            event.id,
+            event.summary,
             start_utc,
             end_utc,
             start_date.map(|date| date.to_string()),
             end_date.map(|date| date.to_string()),
             all_day,
             status,
-            event.color_id,
+            event.color,
         ],
     )?;
     Ok(())
@@ -130,7 +128,7 @@ pub fn events_between(
                     start_date: parse_date(row.get::<_, Option<String>>(4)?.as_deref()),
                     end_date: parse_date(row.get::<_, Option<String>>(5)?.as_deref()),
                     all_day: row.get::<_, i64>(6)? != 0,
-                    color_id: row.get(7)?,
+                    color: row.get(7)?,
                 })
             },
         )?

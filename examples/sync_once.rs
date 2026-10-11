@@ -10,7 +10,7 @@ async fn main() -> Result<()> {
     let paths = config::resolve()?;
     println!("database: {}", paths.database.display());
 
-    let hub = google::connect(
+    let provider = google::GoogleProvider::connect(
         &paths.client_secret,
         &paths.token_cache,
         google::Interactive::Yes,
@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     .await?;
     let conn = db::open_shared(&paths.database)?;
 
-    let report = sync::sync_all(&hub, &conn).await?;
+    let report = sync::sync_all(&provider, &conn).await?;
     println!("synced {} calendar(s)", report.synced);
     if !report.is_complete() {
         println!("failed: {}", report.failed.join(", "));
