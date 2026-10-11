@@ -6,6 +6,9 @@ tokencache.json
 *.db
 *.log
 
+# Local Claude Code tooling preferences, not project config
+.claude/
+
 # Editor / OS noise
 *.swp
 *~
