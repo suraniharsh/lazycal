@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start and sized by duration, all-day events in a band above, overlapping
   events in lanes, and a marker for the current time. `j`/`k` scroll the grid
   in those views.
+- `?` opens a help overlay listing every key.
 - `--sync` to sync and exit without opening the interface, `--offline` to show
   only the cache, plus `--help` and `--version`.
 - A `sign-in needed` status, since Google expires refresh tokens weekly while

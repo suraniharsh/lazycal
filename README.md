@@ -122,6 +122,7 @@ safe to schedule:
 | `t` | Jump to today |
 | `c` | Focus the calendar sidebar |
 | `r` | Sync now |
+| `?` | Show all keys |
 | `q` or `Ctrl-C` | Quit |
 
 While the sidebar is focused:

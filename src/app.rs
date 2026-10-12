@@ -55,6 +55,8 @@ pub struct App {
     pub should_quit: bool,
     pub focus: Focus,
     pub sidebar_index: usize,
+    /// Whether the `?` overlay is covering the calendar.
+    pub show_help: bool,
     /// First visible slot in the Week/Day hour grid. `None` until a view
     /// decides where to open, which it does from the day's own events.
     pub grid_scroll: Option<u32>,
@@ -81,6 +83,7 @@ impl App {
             should_quit: false,
             focus: Focus::Main,
             sidebar_index: 0,
+            show_help: false,
             grid_scroll: None,
             conn,
             calendars,
@@ -188,6 +191,19 @@ impl App {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         {
+            return;
+        }
+
+        // The overlay takes every key while it's up, so nothing navigates
+        // invisibly behind it.
+        if self.show_help {
+            if matches!(key.code, KeyCode::Char('?' | 'q') | KeyCode::Esc) {
+                self.show_help = false;
+            }
+            return;
+        }
+        if key.code == KeyCode::Char('?') {
+            self.show_help = true;
             return;
         }
 
@@ -490,6 +506,60 @@ mod tests {
         app.on_key(key(KeyCode::Char('r')));
         assert!(app.take_refresh_request());
         assert!(!app.take_refresh_request(), "the request is consumed");
+    }
+
+    #[test]
+    fn question_mark_opens_and_closes_the_help() {
+        let (mut app, _dir) = new_app();
+        assert!(!app.show_help);
+
+        app.on_key(key(KeyCode::Char('?')));
+        assert!(app.show_help);
+        app.on_key(key(KeyCode::Char('?')));
+        assert!(!app.show_help, "? toggles back out");
+
+        for closer in [KeyCode::Esc, KeyCode::Char('q')] {
+            app.on_key(key(KeyCode::Char('?')));
+            assert!(app.show_help);
+            app.on_key(key(closer));
+            assert!(!app.show_help, "{closer:?} should close the help");
+        }
+    }
+
+    #[test]
+    fn q_closes_the_help_rather_than_quitting() {
+        // Quitting the app from a help screen would be a nasty surprise.
+        let (mut app, _dir) = new_app();
+        app.on_key(key(KeyCode::Char('?')));
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(!app.show_help);
+        assert!(!app.should_quit, "q dismissed the overlay, it didn't quit");
+    }
+
+    #[test]
+    fn the_help_swallows_navigation_keys() {
+        let (mut app, _dir) = new_app();
+        app.selected = date(2026, 8, 26);
+        app.on_key(key(KeyCode::Char('?')));
+
+        for code in [KeyCode::Char('l'), KeyCode::Char('j'), KeyCode::PageDown] {
+            app.on_key(key(code));
+        }
+        assert_eq!(
+            app.selected,
+            date(2026, 8, 26),
+            "nothing moved behind the overlay"
+        );
+        assert_eq!(app.view, View::Month);
+        assert!(app.show_help, "and the overlay stayed up");
+    }
+
+    #[test]
+    fn ctrl_c_still_quits_from_the_help() {
+        let (mut app, _dir) = new_app();
+        app.on_key(key(KeyCode::Char('?')));
+        app.on_key(ctrl(KeyCode::Char('c')));
+        assert!(app.should_quit, "the interrupt gesture always works");
     }
 
     #[test]

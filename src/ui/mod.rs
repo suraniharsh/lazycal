@@ -1,5 +1,6 @@
 pub mod agenda;
 pub mod day;
+pub mod help;
 pub mod month;
 pub mod render;
 pub mod sidebar;
@@ -42,6 +43,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_main(frame, main_area, app);
 
     draw_footer(frame, footer, app);
+
+    // Last, so it sits on top of whatever view is behind it.
+    if app.show_help {
+        help::draw(frame, area);
+    }
 }
 
 fn draw_main(frame: &mut Frame, area: Rect, app: &App) {
@@ -105,10 +111,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let hints = match (app.focus, app.shows_hour_grid()) {
         (Focus::Sidebar, _) => "j/k: select   space/enter: toggle   esc/c: back   q: quit",
         (Focus::Main, true) => {
-            "m/w/d/a: view   h/l: day   j/k: scroll time   PgUp/PgDn: month   t: today   c: calendars   r: refresh   q: quit"
+            "m/w/d/a: view   h/l: day   j/k: scroll time   PgUp/PgDn: month   t: today   c: calendars   r: refresh   ?: help   q: quit"
         }
         (Focus::Main, false) => {
-            "m/w/d/a: view   h/l: day   j/k: week   PgUp/PgDn: month   t: today   c: calendars   r: refresh   q: quit"
+            "m/w/d/a: view   h/l: day   j/k: week   PgUp/PgDn: month   t: today   c: calendars   r: refresh   ?: help   q: quit"
         }
     };
     frame.render_widget(
