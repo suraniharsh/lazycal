@@ -108,6 +108,7 @@ mod tests {
             color: Color::Rgb(11, 128, 67),
             all_day,
             start_utc: if all_day { None } else { Some(0) },
+            end_utc: if all_day { None } else { Some(3600) },
             continuation: false,
         }
     }

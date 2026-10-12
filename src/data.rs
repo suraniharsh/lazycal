@@ -11,9 +11,12 @@ pub struct EventView {
     pub summary: String,
     pub color: Color,
     pub all_day: bool,
-    /// Start instant for timed events, used for ordering and for showing a
-    /// time. `None` for all-day events.
+    /// Start instant for timed events, used for ordering, for showing a time
+    /// and for placing the event in the hour grid. `None` for all-day events.
     pub start_utc: Option<i64>,
+    /// End instant for timed events, which is what gives a block its height.
+    /// `None` for all-day events.
+    pub end_utc: Option<i64>,
     /// True on the days of a multi-day event other than its first, so the
     /// renderer can mark it as carried over.
     pub continuation: bool,
@@ -48,6 +51,7 @@ pub fn bucket_by_date(
                 color,
                 all_day: row.all_day,
                 start_utc: if row.all_day { None } else { row.start_utc },
+                end_utc: if row.all_day { None } else { row.end_utc },
                 continuation: day != first,
             });
             let Some(next) = day.checked_add_days(Days::new(1)) else {

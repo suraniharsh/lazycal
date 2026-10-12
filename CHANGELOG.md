@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Week and Day are now hour grids: a time axis, events positioned at their
+  start and sized by duration, all-day events in a band above, overlapping
+  events in lanes, and a marker for the current time. `j`/`k` scroll the grid
+  in those views.
 - `--sync` to sync and exit without opening the interface, `--offline` to show
   only the cache, plus `--help` and `--version`.
 - A `sign-in needed` status, since Google expires refresh tokens weekly while
@@ -20,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unattended run fails fast with a non-zero exit instead.
 - Event titles containing emoji presentation sequences (`⏱️`) no longer
   overflow into the next day's column.
-- The selected day highlights only its date rather than filling the whole cell.
+- The selected day highlights only its date rather than filling the whole cell,
+  and today stays marked even when the cursor is on it.
 - The declared MSRV is 1.88, which the dependency tree actually requires.
 
 ## [0.1.0] - 2026-09-08

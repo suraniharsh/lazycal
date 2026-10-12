@@ -3,6 +3,7 @@ pub mod day;
 pub mod month;
 pub mod render;
 pub mod sidebar;
+pub mod timegrid;
 pub mod week;
 
 use ratatui::Frame;
@@ -100,11 +101,15 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let [hints_area, status_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(reserved)]).areas(area);
 
-    let hints = match app.focus {
-        Focus::Main => {
+    // j/k means different things per view, so the hints have to say which.
+    let hints = match (app.focus, app.shows_hour_grid()) {
+        (Focus::Sidebar, _) => "j/k: select   space/enter: toggle   esc/c: back   q: quit",
+        (Focus::Main, true) => {
+            "m/w/d/a: view   h/l: day   j/k: scroll time   PgUp/PgDn: month   t: today   c: calendars   r: refresh   q: quit"
+        }
+        (Focus::Main, false) => {
             "m/w/d/a: view   h/l: day   j/k: week   PgUp/PgDn: month   t: today   c: calendars   r: refresh   q: quit"
         }
-        Focus::Sidebar => "j/k: select   space/enter: toggle   esc/c: back   q: quit",
     };
     frame.render_widget(
         Paragraph::new(Span::styled(hints, Style::default().fg(theme::ACCENT))),

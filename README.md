@@ -21,7 +21,8 @@ email — consider using a throwaway account or blurring sensitive rows. -->
 
 - **Instant startup** — renders from the local cache immediately; sync happens
   in a background task, with a live status indicator in the footer.
-- **Four views** — Month, Week, Day and Agenda.
+- **Four views** — Month, plus Week and Day as hour grids with events
+  placed and sized by time, and Agenda.
 - **Offline capable** — events are cached in SQLite, so navigation works with no
   network.
 - **Incremental sync** — uses Google's sync tokens, so refreshes transfer only
@@ -116,7 +117,7 @@ safe to schedule:
 | --- | --- |
 | `m` / `w` / `d` / `a` | Month / Week / Day / Agenda view |
 | `h` `l` or `←` `→` | Previous / next day |
-| `j` `k` or `↓` `↑` | Next / previous week |
+| `j` `k` or `↓` `↑` | Next / previous week — **scrolls the hour grid** in Week and Day |
 | `PgUp` / `PgDn` | Previous / next month |
 | `t` | Jump to today |
 | `c` | Focus the calendar sidebar |
@@ -187,13 +188,15 @@ inspect the layout without a real terminal.
 ## Limitations
 
 - Read-only; no event creation or editing.
-- Week and Day views are event lists, not hour grids.
 - A sync covers 90 days back and 365 days forward. The window is extended
   automatically as that horizon approaches, but events further out than it
   aren't fetched.
 - A sync runs at startup and on demand with `r`; there's no automatic periodic
   re-sync while the app is open (schedule `--sync` if you want one).
-- No scrolling: views that overflow show a `+N more` count instead.
+- Month and Agenda don't scroll; they show a `+N more` count instead. Week and
+  Day scroll through the day with `j`/`k`.
+- Week columns are narrow, so overlapping events show the first plus a `+N`
+  count rather than side-by-side lanes; the Day view has room for lanes.
 
 ## License
 

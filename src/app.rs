@@ -55,6 +55,9 @@ pub struct App {
     pub should_quit: bool,
     pub focus: Focus,
     pub sidebar_index: usize,
+    /// First visible slot in the Week/Day hour grid. `None` until a view
+    /// decides where to open, which it does from the day's own events.
+    pub grid_scroll: Option<u32>,
     conn: Connection,
     /// The one ordering shared by the sidebar's rendering and its key
     /// handling, so they can't disagree about which row is which.
@@ -78,6 +81,7 @@ impl App {
             should_quit: false,
             focus: Focus::Main,
             sidebar_index: 0,
+            grid_scroll: None,
             conn,
             calendars,
             calendar_colors,
@@ -201,17 +205,40 @@ impl App {
         match code {
             KeyCode::Char('c') => self.focus = Focus::Sidebar,
             KeyCode::Char('r') => self.refresh_requested = true,
-            KeyCode::Char('m') => self.view = View::Month,
-            KeyCode::Char('w') => self.view = View::Week,
-            KeyCode::Char('d') => self.view = View::Day,
-            KeyCode::Char('a') => self.view = View::Agenda,
-            KeyCode::Char('t') => self.selected = Local::now().date_naive(),
+            KeyCode::Char('m') => self.set_view(View::Month),
+            KeyCode::Char('w') => self.set_view(View::Week),
+            KeyCode::Char('d') => self.set_view(View::Day),
+            KeyCode::Char('a') => self.set_view(View::Agenda),
+            KeyCode::Char('t') => {
+                self.selected = Local::now().date_naive();
+                self.grid_scroll = None;
+            }
             KeyCode::Char('h') | KeyCode::Left => self.shift_days(-1),
             KeyCode::Char('l') | KeyCode::Right => self.shift_days(1),
-            KeyCode::Char('k') | KeyCode::Up => self.shift_days(-7),
-            KeyCode::Char('j') | KeyCode::Down => self.shift_days(7),
-            KeyCode::PageUp => self.selected = shift_months(self.selected, -1),
-            KeyCode::PageDown => self.selected = shift_months(self.selected, 1),
+            // Vertical movement means time in the hour grids and weeks in the
+            // month, which is what each view's rows actually represent.
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.shows_hour_grid() {
+                    self.scroll_grid(-2);
+                } else {
+                    self.shift_days(-7);
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.shows_hour_grid() {
+                    self.scroll_grid(2);
+                } else {
+                    self.shift_days(7);
+                }
+            }
+            KeyCode::PageUp => {
+                self.selected = shift_months(self.selected, -1);
+                self.grid_scroll = None;
+            }
+            KeyCode::PageDown => {
+                self.selected = shift_months(self.selected, 1);
+                self.grid_scroll = None;
+            }
             _ => {}
         }
     }
@@ -232,6 +259,27 @@ impl App {
         }
     }
 
+    fn set_view(&mut self, view: View) {
+        self.view = view;
+        self.grid_scroll = None;
+    }
+
+    /// Whether the current view draws a scrollable hour grid.
+    pub fn shows_hour_grid(&self) -> bool {
+        matches!(self.view, View::Week | View::Day)
+    }
+
+    /// Scrolls the hour grid by whole hours, once it has been positioned.
+    fn scroll_grid(&mut self, slots: i32) {
+        let current = self.grid_scroll.unwrap_or(0);
+        let next = if slots >= 0 {
+            current.saturating_add(slots.unsigned_abs())
+        } else {
+            current.saturating_sub(slots.unsigned_abs())
+        };
+        self.grid_scroll = Some(next);
+    }
+
     /// Saturates at chrono's representable range instead of panicking.
     fn shift_days(&mut self, delta: i64) {
         let days = Days::new(delta.unsigned_abs());
@@ -242,6 +290,9 @@ impl App {
         };
         if let Some(date) = shifted {
             self.selected = date;
+            // A new day gets positioned by its own events rather than
+            // inheriting the last day's scroll.
+            self.grid_scroll = None;
         }
     }
 }
