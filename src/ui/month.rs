@@ -10,7 +10,7 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::data::EventView;
 use crate::theme;
-use crate::ui::render::{WEEKDAYS_SHORT, event_lines};
+use crate::ui::render::{WEEKDAYS_SHORT, day_number_style, event_lines};
 
 /// Always six week rows, so the grid height doesn't jump between months.
 const ROWS: usize = 6;
@@ -80,22 +80,11 @@ fn draw_day(
 ) {
     let in_month = date.year() == anchor.year() && date.month() == anchor.month();
     let base_fg = if in_month { theme::TEXT } else { theme::MUTED };
-    let day_fg = if date == today {
-        theme::TODAY_FG
-    } else {
-        base_fg
-    };
 
     let base = Style::default().fg(base_fg);
-    // Only the date carries the highlight. Filling a whole cell with a
-    // palette colour drowns out the events inside it.
-    let day_style = if date == app.selected {
-        Style::default()
-            .fg(theme::contrasting_fg(theme::SELECTED_BG))
-            .bg(theme::SELECTED_BG)
-    } else {
-        Style::default().fg(day_fg)
-    };
+    // Only the date is decorated; filling a whole cell would drown out the
+    // events inside it.
+    let day_style = day_number_style(date == today, date == app.selected, base_fg);
 
     // A column of gutter, so a long title can't run into the next day.
     let width = (area.width as usize).saturating_sub(1);

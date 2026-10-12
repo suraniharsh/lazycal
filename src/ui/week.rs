@@ -10,7 +10,7 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::data::EventView;
 use crate::theme;
-use crate::ui::render::{WEEKDAYS_LONG, event_lines};
+use crate::ui::render::{WEEKDAYS_LONG, day_number_style, event_lines};
 
 pub fn visible_range(app: &App) -> (NaiveDate, NaiveDate) {
     let weekday = u64::from(app.selected.weekday().num_days_from_sunday());
@@ -50,20 +50,9 @@ fn draw_day(
     today: NaiveDate,
     events: Option<&Vec<EventView>>,
 ) {
-    let header_fg = if date == today {
-        theme::TODAY_FG
-    } else {
-        theme::TEXT
-    };
     let base = Style::default().fg(theme::TEXT);
-    // Only the header carries the highlight, so the events stay readable.
-    let header_style = if date == app.selected {
-        Style::default()
-            .fg(theme::contrasting_fg(theme::SELECTED_BG))
-            .bg(theme::SELECTED_BG)
-    } else {
-        Style::default().fg(header_fg)
-    };
+    // Only the header is decorated, so the events stay readable.
+    let header_style = day_number_style(date == today, date == app.selected, theme::TEXT);
 
     let weekday = WEEKDAYS_LONG[date.weekday().num_days_from_sunday() as usize];
     let header = format!("{weekday} {}", date.day());

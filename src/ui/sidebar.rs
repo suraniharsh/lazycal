@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Paragraph};
 use crate::app::{App, Focus};
 use crate::text::truncate_to_width;
 use crate::theme;
-use crate::ui::render::{WEEKDAYS_SHORT, overflow_line};
+use crate::ui::render::{WEEKDAYS_SHORT, day_number_style, overflow_line};
 
 /// Border, title, weekday row and six week rows.
 const MINI_CALENDAR_HEIGHT: u16 = 10;
@@ -73,18 +73,8 @@ fn draw_mini_day(
     today: NaiveDate,
 ) {
     let in_month = date.year() == anchor.year() && date.month() == anchor.month();
-    let fg = if date == today {
-        theme::TODAY_FG
-    } else if in_month {
-        theme::TEXT
-    } else {
-        theme::MUTED
-    };
-
-    let mut style = Style::default().fg(fg);
-    if date == selected {
-        style = style.bg(theme::SELECTED_BG);
-    }
+    let base_fg = if in_month { theme::TEXT } else { theme::MUTED };
+    let style = day_number_style(date == today, date == selected, base_fg);
     frame.render_widget(Paragraph::new(date.day().to_string()).style(style), area);
 }
 

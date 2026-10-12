@@ -1,6 +1,6 @@
 //! Rendering pieces shared by the calendar views.
 
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::data::EventView;
@@ -9,6 +9,29 @@ use crate::theme;
 
 pub const WEEKDAYS_SHORT: [&str; 7] = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
 pub const WEEKDAYS_LONG: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/// Styles a day number so that "today" and "the cursor" stay independently
+/// legible — including when they are the same day, which is the state the app
+/// opens in.
+///
+/// The selection owns the background fill, because that's what moves as you
+/// navigate. Today owns bold and underline, which survive the fill, so the
+/// current date is still identifiable underneath the cursor.
+pub fn day_number_style(is_today: bool, is_selected: bool, base_fg: Color) -> Style {
+    let mut style = Style::default().fg(base_fg);
+    if is_today && !is_selected {
+        style = style.fg(theme::TODAY_FG);
+    }
+    if is_selected {
+        style = style
+            .fg(theme::contrasting_fg(theme::SELECTED_BG))
+            .bg(theme::SELECTED_BG);
+    }
+    if is_today {
+        style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    }
+    style
+}
 
 /// Marker for a timed event, and the columns it takes up.
 const BULLET: &str = "\u{25cf} ";
@@ -94,6 +117,39 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn today_and_the_cursor_stay_tellable_apart() {
+        let plain = day_number_style(false, false, Color::White);
+        let today = day_number_style(true, false, Color::White);
+        let cursor = day_number_style(false, true, Color::White);
+        let both = day_number_style(true, true, Color::White);
+
+        // Every combination renders differently from every other.
+        let all = [plain, today, cursor, both];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "two day states render identically");
+            }
+        }
+    }
+
+    #[test]
+    fn today_stays_marked_underneath_the_cursor() {
+        // The regression: selection used to replace the style outright, so the
+        // current date vanished whenever the cursor sat on it.
+        let both = day_number_style(true, true, Color::White);
+        assert!(both.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(both.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(both.bg, Some(theme::SELECTED_BG), "the cursor still fills");
+    }
+
+    #[test]
+    fn a_plain_day_carries_no_decoration() {
+        let plain = day_number_style(false, false, Color::White);
+        assert_eq!(plain.bg, None);
+        assert!(!plain.add_modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]
