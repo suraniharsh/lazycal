@@ -1,4 +1,5 @@
 pub mod app;
+pub mod clock;
 pub mod config;
 pub mod data;
 pub mod db;
