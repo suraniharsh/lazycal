@@ -45,10 +45,13 @@ pub async fn sync_all(
             let guard = conn.lock().expect("db lock poisoned");
             calendars::upsert_calendar(
                 &guard,
-                &calendar.id,
-                &calendar.name,
-                calendar.color.as_deref(),
-                calendar.is_primary,
+                &calendars::CalendarMeta {
+                    id: &calendar.id,
+                    summary: &calendar.name,
+                    color: calendar.color.as_deref(),
+                    is_primary: calendar.is_primary,
+                    writable: calendar.writable,
+                },
             )?;
         }
 

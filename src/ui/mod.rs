@@ -1,6 +1,7 @@
 pub mod agenda;
 pub mod day;
 pub mod detail;
+pub mod form;
 pub mod help;
 pub mod month;
 pub mod picker;
@@ -15,7 +16,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use crate::app::{App, Focus, SyncStatus, View};
+use crate::app::{App, Focus, SyncStatus, View, WriteStatus};
 use crate::text::{display_width, truncate_to_width};
 use crate::theme;
 
@@ -62,6 +63,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // is up, so neither may be covered by something that doesn't.
     if let Some(choice) = app.link_choice() {
         picker::draw(frame, area, &choice.links, choice.highlighted);
+    }
+    if let Some(draft) = app.draft() {
+        form::draw(frame, area, draft);
     }
 }
 
@@ -186,6 +190,7 @@ fn hints_for(app: &App) -> String {
     } else {
         "j/k: week"
     };
+    let new = if app.write_enabled() { "   n: new" } else { "" };
     // `o` is only offered when there is actually something to open, so the
     // footer isn't advertising a key that would answer "no link". With more
     // than one it says so, because `o` then asks rather than opens.
@@ -195,11 +200,24 @@ fn hints_for(app: &App) -> String {
         _ => "   o: open\u{2026}",
     };
     format!(
-        "m/w/d/a: view   h/l: day   {vertical}   enter: event{open}   t: today   c: calendars   r: refresh"
+        "m/w/d/a: view   h/l: day   {vertical}   enter: event{open}{new}   t: today   c: calendars   r: refresh"
     )
 }
 
 fn status_line(app: &App) -> Line<'static> {
+    // A save in flight outranks the sync status: it is what the user is
+    // waiting on, and it clears in a moment either way.
+    if app.write_status() == WriteStatus::Saving {
+        return Line::from(vec![
+            Span::styled(
+                concat!("lazycal v", env!("CARGO_PKG_VERSION")),
+                Style::default().fg(theme::ACCENT).bold(),
+            ),
+            Span::raw("  "),
+            Span::styled("\u{27f3} saving…", Style::default().fg(theme::MUTED)),
+        ]);
+    }
+
     let (text, color) = match app.sync_status() {
         SyncStatus::NotConfigured => ("\u{26a0} no credentials", theme::WARN),
         SyncStatus::Offline => ("\u{2298} offline", theme::MUTED),

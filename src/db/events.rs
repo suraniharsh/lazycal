@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use chrono::{Days, NaiveDate, TimeZone, Utc};
 use rusqlite::{Connection, params};
@@ -277,4 +279,60 @@ fn local_midnight_utc(date: NaiveDate) -> chrono::DateTime<Utc> {
         .earliest()
         .map(|at| at.with_timezone(&Utc))
         .unwrap_or_else(|| Utc.from_utc_datetime(&naive))
+}
+
+/// Everyone who appears on a cached event, most often first.
+///
+/// The guest field's suggestions come from here: the people already on the
+/// calendar are overwhelmingly the people the next invitation goes to, and
+/// they cost nothing extra to know — they were synced with the events.
+///
+/// The signed-in user is left out. Google puts them on their own events as
+/// organizer, so they would otherwise top the list, and adding yourself as a
+/// guest is not a thing anyone means to do.
+pub fn known_people(conn: &Connection, limit: usize) -> Result<Vec<Person>> {
+    let mut stmt = conn.prepare(
+        "SELECT attendees FROM events
+         WHERE attendees IS NOT NULL
+         ORDER BY COALESCE(start_utc, 0) DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, Option<String>>(0))?
+        .filter_map(Result::ok);
+
+    // Keyed on the lowercased address, because the same person comes back
+    // from Google spelled whichever way whoever invited them typed it.
+    let mut seen: HashMap<String, (usize, Person)> = HashMap::new();
+    for json in rows {
+        for attendee in parse_attendees(json.as_deref()) {
+            if attendee.is_self {
+                continue;
+            }
+            let Some(email) = attendee.person.email.as_deref() else {
+                continue;
+            };
+            let entry = seen
+                .entry(email.to_ascii_lowercase())
+                .or_insert_with(|| (0, attendee.person.clone()));
+            entry.0 += 1;
+            // Rows are newest first, so a name only fills a gap left by a
+            // more recent appearance that had none.
+            if entry.1.name.is_none() {
+                entry.1.name = attendee.person.name.clone();
+            }
+        }
+    }
+
+    let mut people: Vec<(usize, Person)> = seen.into_values().collect();
+    // Most frequent first, then alphabetically, so the order is stable
+    // between runs rather than following the hash map.
+    people.sort_by(|(left_count, left), (right_count, right)| {
+        right_count.cmp(left_count).then_with(|| {
+            left.label()
+                .to_ascii_lowercase()
+                .cmp(&right.label().to_ascii_lowercase())
+        })
+    });
+    people.truncate(limit);
+    Ok(people.into_iter().map(|(_, person)| person).collect())
 }

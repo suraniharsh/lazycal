@@ -33,6 +33,11 @@ pub fn init(conn: &Connection) -> Result<()> {
     // above only covers databases being created for the first time.
     add_column_if_missing(conn, "calendars", "selected", "INTEGER NOT NULL DEFAULT 1")?;
     add_column_if_missing(conn, "calendars", "sync_horizon", "TEXT")?;
+    // Defaults to not writable, so an upgraded database offers nothing until
+    // a sync has said otherwise. `sync_all` lists the calendars every run, so
+    // that is the next startup — and guessing the other way would offer a
+    // holiday feed as a place to put a meeting.
+    add_column_if_missing(conn, "calendars", "writable", "INTEGER NOT NULL DEFAULT 0")?;
     add_column_if_missing(conn, "events", "color_id", "TEXT")?;
 
     // The detail panel's fields. `attendees` is a JSON array: the list is read
@@ -44,8 +49,6 @@ pub fn init(conn: &Connection) -> Result<()> {
         add_column_if_missing(conn, "events", "organizer_name", "TEXT")?,
         add_column_if_missing(conn, "events", "organizer_email", "TEXT")?,
         add_column_if_missing(conn, "events", "attendees", "TEXT")?,
-        add_column_if_missing(conn, "events", "conference_url", "TEXT")?,
-        add_column_if_missing(conn, "events", "links", "TEXT")?,
         add_column_if_missing(conn, "events", "conference_url", "TEXT")?,
         add_column_if_missing(conn, "events", "links", "TEXT")?,
     ];

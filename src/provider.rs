@@ -138,6 +138,11 @@ pub struct ProviderCalendar {
     /// Already resolved to `#rrggbb`.
     pub color: Option<String>,
     pub is_primary: bool,
+    /// Whether the account may add events here. False for a subscribed feed
+    /// such as a holiday or fixtures calendar, and for one shared read-only,
+    /// so the new-event form can leave those out rather than offering a
+    /// target the service is certain to refuse.
+    pub writable: bool,
 }
 
 /// One change from a sync.
@@ -178,6 +183,11 @@ pub enum SyncError {
     RateLimited {
         retry_after: Option<Duration>,
     },
+    /// The credentials are valid but don't carry the access this call needs,
+    /// which is what a read-only sign-in gets for a write. Distinct from
+    /// [`SyncError::NeedsAuth`] because signing in again changes nothing
+    /// unless the user grants more.
+    Forbidden,
     Other(anyhow::Error),
 }
 
@@ -190,6 +200,7 @@ impl fmt::Display for SyncError {
                 Some(wait) => write!(f, "rate limited; retry after {}s", wait.as_secs()),
                 None => write!(f, "rate limited"),
             },
+            Self::Forbidden => write!(f, "the signed-in account may not make this change"),
             Self::Other(err) => write!(f, "{err}"),
         }
     }
@@ -210,7 +221,71 @@ impl From<anyhow::Error> for SyncError {
     }
 }
 
+/// A calendar service lazycal can read.
+///
+/// Implementations own their own paging: `sync_calendar` follows the service's
+/// pagination to the end and returns the accumulated changes, because a resume
+/// cursor is generally only valid once the whole stream has been consumed.
+/// The futures are explicitly `Send` because syncing runs in a spawned task.
+/// Spelling that out here means a provider whose future isn't `Send` fails at
+/// its own `impl` rather than at the far-away spawn site.
+/// An event the user has asked to create, before any service has seen it.
+///
+/// Deliberately smaller than [`ProviderEvent`]: this is what a person types
+/// into a form, not what comes back from a service. No id, because the
+/// provider assigns one; no status or colour, because neither is settable
+/// here.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NewEvent {
+    pub summary: String,
+    pub start: EventTime,
+    pub end: EventTime,
+    pub location: Option<String>,
+    pub description: Option<String>,
+    /// Addresses to invite, already validated and deduplicated. Bare
+    /// addresses rather than [`Attendee`]s: nobody has replied yet, and a
+    /// reply is the only thing that type adds.
+    ///
+    /// **A non-empty list means the service will email these people.** That
+    /// is the point of inviting them, and a provider must not quietly skip it
+    /// — an invitation nobody is told about is worse than no invitation.
+    pub guests: Vec<String>,
+    /// Ask the service to attach its own video call: Google Meet, a Teams
+    /// link, whatever the provider hosts. The URL comes back on the created
+    /// event rather than being chosen here.
+    pub conference: bool,
+}
+
+/// A provider that can be written to.
+///
+/// Separate from [`CalendarProvider`] because read-only providers exist and
+/// always will: a subscribed `webcal://` feed is a static file on someone
+/// else's server. Implementing this says the *service* supports writing —
+/// whether the signed-in session may actually write is
+/// [`CalendarProvider::can_write`], which is a property of the credentials.
+pub trait WritableCalendar: CalendarProvider {
+    /// Creates an event and returns the id the service gave it.
+    ///
+    /// `id` is supplied by the caller so that a retry after a lost response
+    /// doesn't create the event twice. Providers that can't accept a
+    /// caller-chosen id may ignore it and return their own.
+    fn create_event(
+        &self,
+        calendar_id: &str,
+        id: &str,
+        event: &NewEvent,
+    ) -> impl Future<Output = Result<String, SyncError>> + Send;
+}
+
 pub trait CalendarProvider {
+    /// Whether this session may write, which needs both a service that
+    /// supports it and credentials that were granted the access. A provider
+    /// implementing [`WritableCalendar`] can still answer `false` here after
+    /// a read-only sign-in.
+    fn can_write(&self) -> bool {
+        false
+    }
+
     /// Every calendar on the account.
     ///
     /// Must be complete — the caller treats anything missing as removed from

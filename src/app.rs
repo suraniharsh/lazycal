@@ -13,7 +13,9 @@ use crate::clock::Clock;
 use crate::data::{self, EventView};
 use crate::db;
 use crate::db::events::EventDetail;
+use crate::draft::{self, Draft, DraftCalendar};
 use crate::link;
+use crate::provider::NewEvent;
 use crate::theme;
 
 /// Week rows in the month grid. Fixed so the grid's height doesn't jump
@@ -58,6 +60,8 @@ pub struct CalendarSummary {
     pub summary: String,
     pub color: Color,
     pub selected: bool,
+    /// Whether an event can be filed here, which a subscribed feed refuses.
+    pub writable: bool,
 }
 
 /// An event's links, waiting for one to be chosen.
@@ -66,6 +70,11 @@ pub struct LinkChoice {
     pub links: Vec<String>,
     pub highlighted: usize,
 }
+
+/// How many people to carry for the guest field to complete against. Well
+/// past any real calendar's distinct attendees, and a bound on the memory a
+/// form costs regardless.
+const KNOWN_PEOPLE_LIMIT: usize = 500;
 
 pub struct App {
     pub view: View,
@@ -120,6 +129,28 @@ pub struct App {
     calendar_colors: HashMap<String, Color>,
     sync_status: Arc<Mutex<SyncStatus>>,
     refresh_requested: bool,
+    /// Whether the user opted in to write access. Read-only is the default,
+    /// so the new-event key does nothing until they do.
+    write_enabled: bool,
+    /// The open form, if any.
+    draft: Option<Draft>,
+    /// The form whose event is being saved. Held rather than dropped so a
+    /// failure can hand the typing back instead of losing it.
+    saving: Option<Draft>,
+    /// A validated event waiting for the event loop to send it.
+    pending_create: Option<(String, NewEvent)>,
+    write_status: Arc<Mutex<WriteStatus>>,
+}
+
+/// How the last attempt to save an event went.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum WriteStatus {
+    #[default]
+    Idle,
+    Saving,
+    /// Saved; the caller resyncs so the event arrives as the service stored it.
+    Saved,
+    Failed(String),
 }
 
 impl App {
@@ -153,11 +184,99 @@ impl App {
             calendar_colors,
             sync_status: Arc::new(Mutex::new(SyncStatus::Syncing)),
             refresh_requested: false,
+            write_enabled: false,
+            draft: None,
+            saving: None,
+            pending_create: None,
+            write_status: Arc::new(Mutex::new(WriteStatus::Idle)),
         })
     }
 
     pub fn calendars(&self) -> &[CalendarSummary] {
         &self.calendars
+    }
+
+    /// Enables the new-event key. Called once at startup from the stored
+    /// preference, because write access is opt-in.
+    pub fn set_write_enabled(&mut self, enabled: bool) {
+        self.write_enabled = enabled;
+    }
+
+    pub fn write_enabled(&self) -> bool {
+        self.write_enabled
+    }
+
+    /// The open new-event form, if one is.
+    pub fn draft(&self) -> Option<&Draft> {
+        self.draft.as_ref()
+    }
+
+    /// The calendars an event can actually be filed under: writable, and
+    /// shown in the sidebar, since offering a hidden one would create an
+    /// event the user then couldn't see.
+    fn writable_calendars(&self) -> Vec<DraftCalendar> {
+        self.calendars
+            .iter()
+            .filter(|calendar| calendar.writable && calendar.selected)
+            .map(|calendar| DraftCalendar {
+                id: calendar.id.clone(),
+                name: calendar.summary.clone(),
+            })
+            .collect()
+    }
+
+    /// Opens the new-event form on the selected day, reporting whether it
+    /// could: without write access, or with nothing writable to file under,
+    /// there is no form to show.
+    pub fn open_form(&mut self) -> bool {
+        if !self.write_enabled {
+            return false;
+        }
+        let calendars = self.writable_calendars();
+        if calendars.is_empty() {
+            return false;
+        }
+        // Read once here, not per keystroke: it walks every cached attendee
+        // list, and the answer can't change while the form is open.
+        let people =
+            db::events::known_people(&self.conn, KNOWN_PEOPLE_LIMIT).unwrap_or_else(|err| {
+                tracing::warn!("no guest suggestions: {err}");
+                Vec::new()
+            });
+        self.draft = Some(Draft::new(self.selected, calendars, self.clock, people));
+        true
+    }
+
+    /// Hands a validated event to the event loop, which owns the network.
+    pub fn take_create_request(&mut self) -> Option<(String, NewEvent)> {
+        self.pending_create.take()
+    }
+
+    pub fn write_status_handle(&self) -> Arc<Mutex<WriteStatus>> {
+        Arc::clone(&self.write_status)
+    }
+
+    pub fn write_status(&self) -> WriteStatus {
+        self.write_status
+            .lock()
+            .expect("write status lock poisoned")
+            .clone()
+    }
+
+    pub fn set_write_status(&mut self, status: WriteStatus) {
+        *self
+            .write_status
+            .lock()
+            .expect("write status lock poisoned") = status;
+    }
+
+    /// Hands the typing back when a save failed, so the user can fix the
+    /// problem rather than retype the event.
+    pub fn restore_failed_draft(&mut self, error: String) {
+        if let Some(mut draft) = self.saving.take() {
+            draft.error = Some(error);
+            self.draft = Some(draft);
+        }
     }
 
     /// Asks for a sync, which is how a saved event reaches the cache.
@@ -451,6 +570,26 @@ impl App {
         self.cursor_follows_clock = false;
     }
 
+    /// Feeds a key to the open form, and acts on what it asks for.
+    fn on_key_form(&mut self, key: KeyEvent) {
+        let Some(draft) = self.draft.as_mut() else {
+            return;
+        };
+        match draft.on_key(key) {
+            draft::Action::Editing => {}
+            draft::Action::Cancel => self.draft = None,
+            draft::Action::Submit => match draft.to_new_event() {
+                Ok(request) => {
+                    // Held, not dropped: a failed save hands it back.
+                    self.saving = self.draft.take();
+                    self.pending_create = Some(request);
+                    self.set_write_status(WriteStatus::Saving);
+                }
+                Err(message) => draft.error = Some(message),
+            },
+        }
+    }
+
     /// Re-points the automatic cursor at whatever meeting is on now or next.
     ///
     /// Called each time round the event loop, so an event finishing moves the
@@ -587,6 +726,14 @@ impl App {
             return;
         }
 
+        // The form takes every key while it's open: anything else would
+        // navigate the calendar behind it, and every printable character
+        // belongs in whichever field has focus.
+        if self.draft.is_some() {
+            self.on_key_form(key);
+            return;
+        }
+
         // The chooser takes every key while it's up: it is a question, and
         // navigating the calendar behind it would leave it asking about an
         // event that is no longer selected.
@@ -644,6 +791,11 @@ impl App {
         match code {
             KeyCode::Char('c') => self.focus = Focus::Sidebar,
             KeyCode::Char('r') => self.refresh_requested = true,
+            // Does nothing without write access, which is opt-in, so there is
+            // no form to show and no reason to say anything.
+            KeyCode::Char('n') => {
+                self.open_form();
+            }
             KeyCode::Char('o') => self.open_link(),
             KeyCode::Char('m') => self.set_view(View::Month),
             KeyCode::Char('w') => self.set_view(View::Week),
@@ -762,6 +914,7 @@ fn load_calendars(conn: &Connection) -> Result<Vec<CalendarSummary>> {
             id: cal.id,
             summary: cal.summary,
             selected: cal.selected,
+            writable: cal.writable,
         })
         .collect())
 }
@@ -1544,7 +1697,17 @@ mod tests {
         seed_timed(&dir, &[("Next", 60, 90)]);
         {
             let conn = db::open(&dir.path().join("cache.db")).expect("open db");
-            db::calendars::upsert_calendar(&conn, "cal-1", "Work", None, true).expect("insert");
+            db::calendars::upsert_calendar(
+                &conn,
+                &db::calendars::CalendarMeta {
+                    id: "cal-1",
+                    summary: "Work",
+                    color: None,
+                    is_primary: true,
+                    writable: true,
+                },
+            )
+            .expect("insert");
             db::calendars::set_selected(&conn, "cal-1", false).expect("hide");
         }
         app.reload_calendars();

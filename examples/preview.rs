@@ -35,6 +35,27 @@ fn main() -> Result<()> {
     show("next month", &app);
     press(&mut app, KeyCode::PageUp);
 
+    // Tab to the first event on screen, then open its detail panel.
+    press(&mut app, KeyCode::Tab);
+    show("event cursor on the first event", &app);
+    press(&mut app, KeyCode::Enter);
+    show("event detail", &app);
+    press(&mut app, KeyCode::Tab);
+    show("event detail, next event", &app);
+    press(&mut app, KeyCode::Esc);
+
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Tab);
+    show("day view with the cursor on an event", &app);
+    press(&mut app, KeyCode::Enter);
+    show("event detail from the day view", &app);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('m'));
+
+    press(&mut app, KeyCode::Char('?'));
+    show("help", &app);
+    press(&mut app, KeyCode::Esc);
+
     press(&mut app, KeyCode::Char('c'));
     show("sidebar focused", &app);
 

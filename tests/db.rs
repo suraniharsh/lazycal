@@ -181,7 +181,17 @@ fn add_column_if_missing_is_a_no_op_when_present() {
 #[test]
 fn upsert_preserves_locally_owned_columns() {
     let conn = memory_db();
-    calendars::upsert_calendar(&conn, "cal-1", "Work", Some("#112233"), true).expect("insert");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work",
+            color: Some("#112233"),
+            is_primary: true,
+            writable: true,
+        },
+    )
+    .expect("insert");
 
     // Local-only state: a sync position and a hidden-in-the-sidebar choice.
     let state = SyncState {
@@ -192,8 +202,17 @@ fn upsert_preserves_locally_owned_columns() {
     calendars::set_selected(&conn, "cal-1", false).expect("hide");
 
     // A later sync re-upserts the calendar's metadata from Google.
-    calendars::upsert_calendar(&conn, "cal-1", "Work (renamed)", Some("#445566"), true)
-        .expect("re-upsert");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work (renamed)",
+            color: Some("#445566"),
+            is_primary: true,
+            writable: true,
+        },
+    )
+    .expect("re-upsert");
 
     let rows = calendars::list_calendars(&conn).expect("list");
     assert_eq!(rows.len(), 1, "upsert must not duplicate the row");
@@ -215,7 +234,17 @@ fn sync_state_is_empty_for_unknown_and_fresh_calendars() {
         SyncState::default()
     );
 
-    calendars::upsert_calendar(&conn, "cal-1", "Work", None, false).expect("insert");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work",
+            color: None,
+            is_primary: false,
+            writable: true,
+        },
+    )
+    .expect("insert");
     assert_eq!(
         calendars::sync_state(&conn, "cal-1").expect("fresh"),
         SyncState::default()
@@ -225,7 +254,17 @@ fn sync_state_is_empty_for_unknown_and_fresh_calendars() {
 #[test]
 fn clearing_the_sync_token_keeps_the_horizon_and_visibility() {
     let conn = memory_db();
-    calendars::upsert_calendar(&conn, "cal-1", "Work", None, false).expect("insert");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work",
+            color: None,
+            is_primary: false,
+            writable: true,
+        },
+    )
+    .expect("insert");
     calendars::set_selected(&conn, "cal-1", false).expect("hide");
     calendars::set_sync_state(
         &conn,
@@ -252,10 +291,30 @@ fn clearing_the_sync_token_keeps_the_horizon_and_visibility() {
 #[test]
 fn upsert_keeps_a_known_color_when_google_omits_it() {
     let conn = memory_db();
-    calendars::upsert_calendar(&conn, "cal-1", "Work", Some("#0b8043"), false).expect("insert");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work",
+            color: Some("#0b8043"),
+            is_primary: false,
+            writable: true,
+        },
+    )
+    .expect("insert");
 
     // A later listing without backgroundColor must not erase the color.
-    calendars::upsert_calendar(&conn, "cal-1", "Work", None, false).expect("re-upsert");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work",
+            color: None,
+            is_primary: false,
+            writable: true,
+        },
+    )
+    .expect("re-upsert");
 
     let rows = calendars::list_calendars(&conn).expect("list");
     assert_eq!(rows[0].color.as_deref(), Some("#0b8043"));
@@ -288,9 +347,39 @@ fn delete_for_calendar_clears_only_that_calendars_events() {
 #[test]
 fn list_calendars_puts_the_primary_first() {
     let conn = memory_db();
-    calendars::upsert_calendar(&conn, "b", "Beta", None, false).expect("insert b");
-    calendars::upsert_calendar(&conn, "a", "Alpha", None, false).expect("insert a");
-    calendars::upsert_calendar(&conn, "p", "Zulu (primary)", None, true).expect("insert p");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "b",
+            summary: "Beta",
+            color: None,
+            is_primary: false,
+            writable: true,
+        },
+    )
+    .expect("insert b");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "a",
+            summary: "Alpha",
+            color: None,
+            is_primary: false,
+            writable: true,
+        },
+    )
+    .expect("insert a");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "p",
+            summary: "Zulu (primary)",
+            color: None,
+            is_primary: true,
+            writable: true,
+        },
+    )
+    .expect("insert p");
 
     let names: Vec<_> = calendars::list_calendars(&conn)
         .expect("list")
@@ -303,7 +392,17 @@ fn list_calendars_puts_the_primary_first() {
 #[test]
 fn delete_calendar_also_removes_its_events() {
     let conn = memory_db();
-    calendars::upsert_calendar(&conn, "cal-1", "Work", None, false).expect("insert");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work",
+            color: None,
+            is_primary: false,
+            writable: true,
+        },
+    )
+    .expect("insert");
     events::apply(
         &conn,
         "cal-1",
@@ -602,7 +701,17 @@ fn a_second_init_leaves_the_sync_token_alone() {
     // Only the upgrade clears it; every later start must not throw away a
     // perfectly good cursor and resync everything.
     let conn = memory_db();
-    calendars::upsert_calendar(&conn, "cal-1", "Work", None, true).expect("insert");
+    calendars::upsert_calendar(
+        &conn,
+        &calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work",
+            color: None,
+            is_primary: true,
+            writable: true,
+        },
+    )
+    .expect("insert");
     calendars::set_sync_state(
         &conn,
         "cal-1",
@@ -617,4 +726,101 @@ fn a_second_init_leaves_the_sync_token_alone() {
 
     let state = calendars::sync_state(&conn, "cal-1").expect("read state");
     assert_eq!(state.token.as_deref(), Some("token-1"));
+}
+
+#[test]
+fn the_people_already_on_the_calendar_can_be_listed() {
+    let conn = memory_db();
+    let person = |name: &str, email: &str, is_self: bool| Attendee {
+        person: Person {
+            name: (!name.is_empty()).then(|| name.to_owned()),
+            email: Some(email.to_owned()),
+        },
+        response: Response::Accepted,
+        is_self,
+        optional: false,
+    };
+
+    // Priya is on two events and Sam on one, so Priya comes first.
+    for (id, attendees) in [
+        (
+            "e1",
+            vec![
+                person("You", "me@example.com", true),
+                person("Priya", "priya@example.com", false),
+                person("Sam", "sam@example.com", false),
+            ],
+        ),
+        (
+            "e2",
+            // The same person, spelled differently and with no name.
+            vec![person("", "PRIYA@example.com", false)],
+        ),
+    ] {
+        events::apply(
+            &conn,
+            "cal-1",
+            &upsert(ProviderEvent {
+                id: id.to_owned(),
+                attendees,
+                ..plain_event()
+            }),
+        )
+        .expect("apply");
+    }
+
+    let people = events::known_people(&conn, 10).expect("list");
+    let emails: Vec<&str> = people
+        .iter()
+        .filter_map(|person| person.email.as_deref())
+        .collect();
+    assert_eq!(
+        emails,
+        ["priya@example.com", "sam@example.com"],
+        "the signed-in user is left out, and the two spellings are one person"
+    );
+    assert_eq!(
+        people[0].name.as_deref(),
+        Some("Priya"),
+        "the spelling with a name wins over the one without"
+    );
+}
+
+#[test]
+fn listing_people_respects_its_limit_and_an_empty_cache() {
+    let conn = memory_db();
+    assert!(
+        events::known_people(&conn, 10).expect("list").is_empty(),
+        "a cache with no events knows nobody"
+    );
+
+    events::apply(
+        &conn,
+        "cal-1",
+        &upsert(ProviderEvent {
+            attendees: (0..20)
+                .map(|index| Attendee {
+                    person: Person {
+                        name: None,
+                        email: Some(format!("person{index}@example.com")),
+                    },
+                    response: Response::NeedsAction,
+                    is_self: false,
+                    optional: false,
+                })
+                .collect(),
+            ..plain_event()
+        }),
+    )
+    .expect("apply");
+    assert_eq!(events::known_people(&conn, 5).expect("list").len(), 5);
+}
+
+#[test]
+fn an_event_with_no_attendees_contributes_nobody() {
+    // Holiday and fixtures feeds are most of a real cache, and their rows
+    // store NULL rather than "[]" — the query has to skip them.
+    let conn = memory_db();
+    events::apply(&conn, "cal-1", &upsert(plain_event())).expect("apply");
+    assert!(events::known_people(&conn, 10).expect("list").is_empty());
 }

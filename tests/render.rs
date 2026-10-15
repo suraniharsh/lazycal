@@ -10,6 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazycal::app::App;
 use lazycal::clock::Clock;
 use lazycal::db;
+use lazycal::draft::Field;
 use lazycal::provider::{
     Attendee, Change, EventStatus, EventTime, Person, ProviderEvent, Response,
 };
@@ -52,8 +53,17 @@ fn busy_app() -> (App, tempfile::TempDir, NaiveDate) {
     let conn = db::open(&path).expect("open db");
     let on = date(2026, 10, 12);
 
-    db::calendars::upsert_calendar(&conn, "cal-1", "Work", Some("#112233"), true)
-        .expect("insert calendar");
+    db::calendars::upsert_calendar(
+        &conn,
+        &db::calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work",
+            color: Some("#112233"),
+            is_primary: true,
+            writable: true,
+        },
+    )
+    .expect("insert calendar");
 
     // Local time, not UTC: these events are asserted about by the local day
     // they fall on, and a UTC instant lands on a different date either side
@@ -253,6 +263,21 @@ fn rendered_text(app: &App, width: u16, height: u16) -> String {
         .join("\n")
 }
 
+/// Tabs the open form round to `field`, so a test doesn't depend on how many
+/// rows happen to come before it.
+fn focus_field(app: &mut App, field: Field) {
+    for _ in 0..ORDER_LIMIT {
+        if app.draft().expect("the form is open").focus == field {
+            return;
+        }
+        press(app, KeyCode::Tab);
+    }
+    panic!("the form never focused {field:?}");
+}
+
+/// More tabs than the form has rows, so a wrong answer fails rather than loops.
+const ORDER_LIMIT: usize = 32;
+
 /// Whether any cell in a rendered frame is drawn reversed, which is how the
 /// event cursor marks itself.
 fn has_reversed_cell(app: &App, width: u16, height: u16) -> bool {
@@ -386,6 +411,277 @@ fn crowded_app(count: u32) -> (App, tempfile::TempDir, NaiveDate) {
     (app, dir, on)
 }
 
+/// An app with write access granted and one writable calendar, which is what
+/// the new-event form needs to open at all.
+fn writable_app() -> (App, tempfile::TempDir, NaiveDate) {
+    let (mut app, dir, on) = busy_app();
+    app.set_write_enabled(true);
+    app.selected = on;
+    (app, dir, on)
+}
+
+#[test]
+fn the_new_event_form_draws_at_every_size() {
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    assert!(app.draft().is_some(), "the form opened");
+
+    for (width, height) in SIZES {
+        draw_at(&app, width, height);
+    }
+
+    // All-day drops two rows, and a validation complaint adds two, so both
+    // shapes get drawn.
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Tab);
+    }
+    press(&mut app, KeyCode::Char(' '));
+    for (width, height) in SIZES {
+        draw_at(&app, width, height);
+    }
+
+    press(&mut app, KeyCode::Enter);
+    assert!(
+        app.draft().is_some_and(|draft| draft.error.is_some()),
+        "an empty title is refused"
+    );
+    for (width, height) in SIZES {
+        draw_at(&app, width, height);
+    }
+}
+
+#[test]
+fn a_long_value_keeps_the_caret_on_screen() {
+    // A meeting URL is longer than the field, so the value has to scroll or
+    // the caret ends up outside the panel with nothing to type against.
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    focus_field(&mut app, Field::Location);
+    let url = "https://meet.example.com/a-very-long-meeting-url-indeed";
+    for character in url.chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    assert_eq!(
+        app.draft().expect("the form is open").location.value(),
+        url,
+        "the typing did not reach the field under test"
+    );
+    for (width, height) in SIZES {
+        draw_at(&app, width, height);
+    }
+    assert!(
+        has_reversed_cell(&app, 100, 30),
+        "the caret is not drawn anywhere"
+    );
+}
+
+#[test]
+fn the_form_does_not_open_without_write_access() {
+    // Read-only is the default, and `n` has to be inert there rather than
+    // offering a form whose save would be refused.
+    let (mut app, _dir, _on) = busy_app();
+    press(&mut app, KeyCode::Char('n'));
+    assert!(app.draft().is_none());
+}
+
+#[test]
+fn the_form_does_not_open_without_a_writable_calendar() {
+    // `busy_app` seeds one writable calendar; take that away and there is
+    // nowhere to file an event.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cache.db");
+    let conn = db::open(&path).expect("open db");
+    db::calendars::upsert_calendar(
+        &conn,
+        &db::calendars::CalendarMeta {
+            id: "feed",
+            summary: "Holidays",
+            color: None,
+            is_primary: false,
+            writable: false,
+        },
+    )
+    .expect("insert calendar");
+    drop(conn);
+
+    let mut app = App::open(&path).expect("open app");
+    app.set_write_enabled(true);
+    press(&mut app, KeyCode::Char('n'));
+    assert!(app.draft().is_none(), "a subscribed feed is not a target");
+}
+
+#[test]
+fn the_form_swallows_keys_that_would_otherwise_navigate() {
+    // Typing "w" into the title must not switch to the week view behind the
+    // form.
+    let (mut app, _dir, on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    for character in "week".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    assert_eq!(app.selected, on, "the day did not move");
+    assert_eq!(
+        app.draft().map(|draft| draft.summary.value()),
+        Some("week"),
+        "the keys went into the field"
+    );
+}
+
+#[test]
+fn esc_closes_the_form() {
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    press(&mut app, KeyCode::Esc);
+    assert!(app.draft().is_none());
+}
+
+#[test]
+fn ctrl_c_still_quits_with_the_form_open() {
+    // The form takes every key, but not the one that gets the user out.
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.should_quit);
+}
+
+#[test]
+fn submitting_a_valid_form_hands_over_an_event() {
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    for character in "Pairing session".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert!(app.draft().is_none(), "the form closed while it saves");
+    let (calendar, event) = app.take_create_request().expect("an event to create");
+    assert_eq!(calendar, "cal-1");
+    assert_eq!(event.summary, "Pairing session");
+}
+
+#[test]
+fn a_failed_save_hands_the_typing_back() {
+    // Losing what someone typed because the network blinked is the worst
+    // possible outcome here.
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    for character in "Hard-won title".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    focus_field(&mut app, Field::Guests);
+    for character in "sam@example.com, alex@example.com".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    focus_field(&mut app, Field::Conference);
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Enter);
+    let _ = app.take_create_request();
+
+    app.restore_failed_draft("the network is down".to_owned());
+    let draft = app.draft().expect("the form came back");
+    assert_eq!(draft.summary.value(), "Hard-won title");
+    // A guest list is the most expensive thing on the form to retype.
+    assert_eq!(draft.guests.value(), "sam@example.com, alex@example.com");
+    assert!(draft.conference, "the video call choice came back too");
+    assert_eq!(draft.error.as_deref(), Some("the network is down"));
+    draw_at(&app, 100, 30);
+}
+
+#[test]
+fn the_form_offers_guests_and_a_video_call() {
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    let rendered = rendered_text(&app, 100, 30);
+    assert!(rendered.contains("Guests"), "{rendered}");
+    assert!(rendered.contains("Video call"), "{rendered}");
+}
+
+#[test]
+fn the_form_says_how_many_people_a_save_will_email() {
+    // Inviting someone sends them mail, and finding that out afterwards is
+    // not an acceptable way to learn it.
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    let quiet = rendered_text(&app, 100, 30);
+    assert!(
+        !quiet.contains("will be emailed"),
+        "nobody is invited yet: {quiet}"
+    );
+
+    focus_field(&mut app, Field::Guests);
+    for character in "sam@example.com".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    let one = rendered_text(&app, 100, 30);
+    assert!(one.contains("1 guest will be emailed"), "{one}");
+
+    for character in ", alex@example.com".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    let two = rendered_text(&app, 100, 30);
+    assert!(two.contains("2 guests will be emailed"), "{two}");
+
+    // The notice adds a row, so every size gets drawn again with it there.
+    for (width, height) in SIZES {
+        draw_at(&app, width, height);
+    }
+}
+
+#[test]
+fn guests_and_a_video_call_reach_the_event_being_created() {
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    for character in "Design review".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    focus_field(&mut app, Field::Guests);
+    for character in "Sam@example.com, sam@example.com alex@example.com".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    focus_field(&mut app, Field::Conference);
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Enter);
+
+    let (_, event) = app.take_create_request().expect("an event to create");
+    assert_eq!(
+        event.guests,
+        vec!["Sam@example.com".to_owned(), "alex@example.com".to_owned()],
+        "the repeat of the same address differing only in case was dropped"
+    );
+    assert!(event.conference, "the video call was asked for");
+}
+
+#[test]
+fn a_guest_that_is_not_an_address_is_refused_before_anything_is_sent() {
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    for character in "Design review".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    focus_field(&mut app, Field::Guests);
+    for character in "sam".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    press(&mut app, KeyCode::Enter);
+
+    assert!(
+        app.take_create_request().is_none(),
+        "nothing may be sent with an unusable guest list"
+    );
+    let draft = app.draft().expect("the form stayed open");
+    let error = draft.error.as_deref().expect("a complaint");
+    assert!(
+        error.contains("sam"),
+        "the complaint names the offender: {error}"
+    );
+    assert_eq!(
+        draft.summary.value(),
+        "Design review",
+        "the typing is intact"
+    );
+    draw_at(&app, 100, 30);
+}
+
 #[test]
 fn the_detail_panel_shows_a_room_and_a_link_separately() {
     let (mut app, _dir, on) = busy_app();
@@ -451,6 +747,56 @@ fn the_hour_gutter_does_not_change_width_with_the_clock() {
     let twenty_four = column_of(&app);
     app.clock = Clock::H12;
     assert_eq!(column_of(&app), twenty_four);
+}
+
+#[test]
+fn the_form_shows_the_length_and_nudges_the_time() {
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    let rendered = rendered_text(&app, 100, 30);
+    assert!(rendered.contains("30m"), "the default length: {rendered}");
+
+    focus_field(&mut app, Field::End);
+    for _ in 0..2 {
+        press(&mut app, KeyCode::Up);
+    }
+    let rendered = rendered_text(&app, 100, 30);
+    assert!(
+        rendered.contains("1h"),
+        "half an hour plus two nudges: {rendered}"
+    );
+    assert!(
+        rendered.contains("to nudge"),
+        "the border says so: {rendered}"
+    );
+}
+
+#[test]
+fn the_guest_field_completes_from_the_cache() {
+    // The suggestions come from whoever is on the cached events, so this
+    // drives the whole path: sync -> cache -> query -> form.
+    let (mut app, _dir, _on) = writable_app();
+    press(&mut app, KeyCode::Char('n'));
+    focus_field(&mut app, Field::Guests);
+    for character in "person1".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+
+    let rendered = rendered_text(&app, 100, 30);
+    assert!(rendered.contains("person1@example.com"), "{rendered}");
+    assert!(rendered.contains("to take the name"), "{rendered}");
+
+    press(&mut app, KeyCode::Tab);
+    let draft = app.draft().expect("the form is open");
+    assert_eq!(draft.guests.value(), "person1@example.com, ");
+    assert_eq!(
+        draft.focus,
+        Field::Guests,
+        "tab completed rather than moved"
+    );
+    for (width, height) in SIZES {
+        draw_at(&app, width, height);
+    }
 }
 
 thread_local! {
@@ -609,7 +955,17 @@ fn a_link_pasted_in_the_body_is_what_o_opens() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cache.db");
     let conn = db::open(&path).expect("open db");
-    db::calendars::upsert_calendar(&conn, "cal-1", "Work", None, true).expect("calendar");
+    db::calendars::upsert_calendar(
+        &conn,
+        &db::calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work",
+            color: None,
+            is_primary: true,
+            writable: false,
+        },
+    )
+    .expect("calendar");
     let on = date(2026, 10, 12);
     db::events::apply(
         &conn,
@@ -648,7 +1004,17 @@ fn linked_app(count: usize) -> (App, tempfile::TempDir, NaiveDate) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cache.db");
     let conn = db::open(&path).expect("open db");
-    db::calendars::upsert_calendar(&conn, "cal-1", "Work", None, true).expect("calendar");
+    db::calendars::upsert_calendar(
+        &conn,
+        &db::calendars::CalendarMeta {
+            id: "cal-1",
+            summary: "Work",
+            color: None,
+            is_primary: true,
+            writable: false,
+        },
+    )
+    .expect("calendar");
     let on = date(2026, 10, 12);
     db::events::apply(
         &conn,
@@ -768,11 +1134,13 @@ fn the_chooser_swallows_keys_that_would_otherwise_navigate() {
         KeyCode::Char('m'),
         KeyCode::Char('t'),
         KeyCode::Char('?'),
+        KeyCode::Char('n'),
     ] {
         press(&mut app, code);
     }
     assert_eq!(app.selected, on, "the date did not move");
     assert!(!app.show_help, "the help overlay did not open");
+    assert!(app.draft().is_none(), "the form did not open");
     assert!(app.link_choice().is_some(), "and the question is still up");
 }
 

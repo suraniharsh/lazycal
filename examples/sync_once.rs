@@ -14,6 +14,9 @@ async fn main() -> Result<()> {
         &paths.client_secret,
         &paths.token_cache,
         google::Interactive::Yes,
+        // These only read; granting write here would ask for consent the
+        // example doesn't need.
+        google::Access::ReadOnly,
     )
     .await?;
     let conn = db::open_shared(&paths.database)?;

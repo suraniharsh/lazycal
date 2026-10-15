@@ -8,6 +8,19 @@ pub struct CalendarRow {
     pub color: Option<String>,
     pub is_primary: bool,
     pub selected: bool,
+    pub writable: bool,
+}
+
+/// What a sync knows about a calendar, as named fields.
+///
+/// Positional arguments here were four in a row ending in two booleans, which
+/// is how a caller comes to pass visibility where primary was wanted.
+pub struct CalendarMeta<'a> {
+    pub id: &'a str,
+    pub summary: &'a str,
+    pub color: Option<&'a str>,
+    pub is_primary: bool,
+    pub writable: bool,
 }
 
 /// What a previous sync left behind for one calendar: the token to resume
@@ -24,21 +37,22 @@ pub struct SyncState {
 /// discard a visibility choice or a sync position. `color` is coalesced
 /// because Google only returns `backgroundColor` in some configurations, and
 /// a response without it shouldn't erase the color already known.
-pub fn upsert_calendar(
-    conn: &Connection,
-    id: &str,
-    summary: &str,
-    color: Option<&str>,
-    is_primary: bool,
-) -> Result<()> {
+pub fn upsert_calendar(conn: &Connection, meta: &CalendarMeta<'_>) -> Result<()> {
     conn.execute(
-        "INSERT INTO calendars (id, summary, color, is_primary)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO calendars (id, summary, color, is_primary, writable)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(id) DO UPDATE SET
              summary = excluded.summary,
              color = COALESCE(excluded.color, calendars.color),
-             is_primary = excluded.is_primary",
-        params![id, summary, color, is_primary],
+             is_primary = excluded.is_primary,
+             writable = excluded.writable",
+        params![
+            meta.id,
+            meta.summary,
+            meta.color,
+            meta.is_primary,
+            meta.writable
+        ],
     )?;
     Ok(())
 }
@@ -110,7 +124,7 @@ pub fn delete_calendar(conn: &Connection, id: &str) -> Result<()> {
 
 pub fn list_calendars(conn: &Connection) -> Result<Vec<CalendarRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, summary, color, is_primary, selected
+        "SELECT id, summary, color, is_primary, selected, writable
          FROM calendars
          ORDER BY is_primary DESC, summary",
     )?;
@@ -122,6 +136,7 @@ pub fn list_calendars(conn: &Connection) -> Result<Vec<CalendarRow>> {
                 color: row.get(2)?,
                 is_primary: row.get::<_, i64>(3)? != 0,
                 selected: row.get::<_, i64>(4)? != 0,
+                writable: row.get::<_, i64>(5)? != 0,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

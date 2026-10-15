@@ -37,6 +37,7 @@ const ENTRIES: &[Entry] = &[
     // The panel's own bottom border says how to close it, so this list
     // doesn't spend one of its scarce rows repeating that.
     Key("j  k", "scroll a long description"),
+    Key("n", "add an event (needs lazycal --enable-write)"),
     Section("Calendars"),
     Key("c  esc", "focus the calendar list, and leave it again"),
     Key("j  k", "move through the list"),
@@ -167,6 +168,7 @@ mod tests {
             "esc",
             "space",
             "enter",
+            "n",
             "o",
             "tab",
             "shift-tab",

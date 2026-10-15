@@ -5,7 +5,8 @@ use std::pin::Pin;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Days, NaiveDate, Utc};
 use google_calendar3::api::{
-    CalendarListEntry, Event, EventAttendee, EventDateTime, EventListCall,
+    CalendarListEntry, ConferenceData, ConferenceSolutionKey, CreateConferenceRequest, Event,
+    EventAttendee, EventDateTime, EventListCall,
 };
 use google_calendar3::hyper_rustls::{self, HttpsConnector};
 use google_calendar3::hyper_util::client::legacy::Client;
@@ -16,18 +17,46 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 
 use crate::provider::{
-    Attendee, CalendarProvider, Change, EventStatus, EventTime, Person, ProviderCalendar,
-    ProviderEvent, Response, SyncError, SyncKind, SyncOutcome, Window,
+    Attendee, CalendarProvider, Change, EventStatus, EventTime, NewEvent, Person, ProviderCalendar,
+    ProviderEvent, Response, SyncError, SyncKind, SyncOutcome, Window, WritableCalendar,
 };
 
-/// Read-only access is enough: calendar visibility is a local preference and
-/// is never written back to Google.
+/// Reads everything: the calendar list, and the events on each calendar.
 ///
 /// Requested explicitly on every call, because yup-oauth2 caches tokens per
 /// requested scope set — letting individual calls fall back to the generated
 /// client's own per-method scope hint would ask for a fresh consent for each
 /// distinct scope encountered.
-pub const SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+pub const SCOPE_READ: &str = "https://www.googleapis.com/auth/calendar.readonly";
+
+/// Creates and edits events. Does **not** cover `calendarList.list`, which
+/// accepts only the read, full, or calendar-list scopes — so writing needs
+/// this *in addition to* [`SCOPE_READ`], never instead of it.
+pub const SCOPE_WRITE: &str = "https://www.googleapis.com/auth/calendar.events";
+
+/// What the signed-in session is allowed to do.
+///
+/// Read-only is the default because calendar visibility is a local preference
+/// that is never written back, so most users never need more, and a narrower
+/// scope is a smaller consent screen and a smaller blast radius.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Access {
+    #[default]
+    ReadOnly,
+    ReadWrite,
+}
+
+impl Access {
+    /// The scopes to request. Every call asks for the whole set rather than
+    /// only what it needs, so that one cached token covers reads and writes
+    /// and the user is asked to consent once.
+    pub fn scopes(self) -> &'static [&'static str] {
+        match self {
+            Self::ReadOnly => &[SCOPE_READ],
+            Self::ReadWrite => &[SCOPE_READ, SCOPE_WRITE],
+        }
+    }
+}
 
 /// Calendars per `calendarList.list` page (the API's maximum is 250).
 const CALENDAR_PAGE_SIZE: i32 = 250;
@@ -132,7 +161,7 @@ pub fn encode_calendar_id(id: &str) -> String {
 ///
 /// Completeness matters: the caller treats anything missing from this list as
 /// removed from the account and prunes it from the cache.
-pub async fn list_calendars(hub: &Hub) -> Result<Vec<CalendarListEntry>> {
+pub async fn list_calendars(hub: &Hub, access: Access) -> Result<Vec<CalendarListEntry>> {
     let mut calendars = Vec::new();
     let mut page_token: Option<String> = None;
 
@@ -141,7 +170,7 @@ pub async fn list_calendars(hub: &Hub) -> Result<Vec<CalendarListEntry>> {
             .calendar_list()
             .list()
             .max_results(CALENDAR_PAGE_SIZE)
-            .add_scope(SCOPE);
+            .add_scopes(access.scopes());
         if let Some(token) = &page_token {
             call = call.page_token(token);
         }
@@ -159,6 +188,7 @@ pub async fn list_calendars(hub: &Hub) -> Result<Vec<CalendarListEntry>> {
 /// Google Calendar as a [`CalendarProvider`].
 pub struct GoogleProvider {
     hub: Hub,
+    access: Access,
 }
 
 impl GoogleProvider {
@@ -166,13 +196,16 @@ impl GoogleProvider {
         client_secret_path: &Path,
         token_cache_path: &Path,
         interactive: Interactive,
+        access: Access,
     ) -> Result<Self> {
         Ok(Self {
             hub: connect(client_secret_path, token_cache_path, interactive).await?,
+            access,
         })
     }
 
     fn events_call(&self, encoded_id: &str) -> EventListCall<'_, Connector> {
+        let access = self.access;
         self.hub
             .events()
             .list(encoded_id)
@@ -182,13 +215,19 @@ impl GoogleProvider {
             // Incremental sync reports deletions as cancelled events.
             .show_deleted(true)
             .max_results(EVENT_PAGE_SIZE)
-            .add_scope(SCOPE)
+            .add_scopes(access.scopes())
     }
 }
 
 impl CalendarProvider for GoogleProvider {
+    fn can_write(&self) -> bool {
+        self.access == Access::ReadWrite
+    }
+
     async fn list_calendars(&self) -> Result<Vec<ProviderCalendar>, SyncError> {
-        let entries = list_calendars(&self.hub).await.map_err(classify)?;
+        let entries = list_calendars(&self.hub, self.access)
+            .await
+            .map_err(classify)?;
         Ok(entries.iter().filter_map(to_provider_calendar).collect())
     }
 
@@ -258,6 +297,10 @@ fn to_provider_calendar(entry: &CalendarListEntry) -> Option<ProviderCalendar> {
             .unwrap_or_else(|| entry.id.clone().unwrap_or_default()),
         color: entry.background_color.clone(),
         is_primary: entry.primary.unwrap_or(false),
+        // "reader" and "freeBusyReader" cannot be written to. An absent role
+        // is treated as read-only: refusing to offer a calendar is recoverable,
+        // offering one that rejects every write is not.
+        writable: matches!(entry.access_role.as_deref(), Some("owner" | "writer")),
     })
 }
 
@@ -625,6 +668,21 @@ fn is_full_resync_required(err: &google_calendar3::Error) -> bool {
     }
 }
 
+/// Whether `err` is Google refusing the request rather than failing it: the
+/// token is good but doesn't carry the scope, or the account may not write to
+/// this calendar (a subscribed holiday feed, or one shared read-only).
+fn is_forbidden(err: &google_calendar3::Error) -> bool {
+    match err {
+        google_calendar3::Error::BadRequest(body) => {
+            matches!(body["error"]["code"].as_i64(), Some(401 | 403))
+        }
+        google_calendar3::Error::Failure(response) => {
+            matches!(response.status().as_u16(), 401 | 403)
+        }
+        _ => false,
+    }
+}
+
 /// Translates a Google failure into the neutral error the engine acts on.
 fn classify(err: anyhow::Error) -> SyncError {
     if needs_reauthorization(&err) {
@@ -632,19 +690,117 @@ fn classify(err: anyhow::Error) -> SyncError {
     }
     match err.downcast_ref::<google_calendar3::Error>() {
         Some(google) if is_full_resync_required(google) => SyncError::FullResyncRequired,
+        Some(google) if is_forbidden(google) => SyncError::Forbidden,
         _ => SyncError::Other(err),
+    }
+}
+
+/// Maps a draft onto the shape `events.insert` wants.
+fn to_google_event(id: &str, event: &NewEvent) -> Event {
+    let slot = |time: EventTime| match time {
+        EventTime::Date(date) => EventDateTime {
+            date: Some(date),
+            ..Default::default()
+        },
+        EventTime::Instant(at) => EventDateTime {
+            date_time: Some(at),
+            ..Default::default()
+        },
+    };
+    Event {
+        id: Some(id.to_owned()),
+        summary: Some(event.summary.clone()),
+        start: Some(slot(event.start)),
+        end: Some(slot(event.end)),
+        location: event.location.clone(),
+        description: event.description.clone(),
+        attendees: (!event.guests.is_empty()).then(|| {
+            event
+                .guests
+                .iter()
+                .map(|email| EventAttendee {
+                    email: Some(email.clone()),
+                    ..Default::default()
+                })
+                .collect()
+        }),
+        conference_data: event.conference.then(|| ConferenceData {
+            create_request: Some(CreateConferenceRequest {
+                // The event id doubles as the request id, which is what makes
+                // a retry after a lost response reuse the same conference
+                // instead of booking a second one.
+                request_id: Some(id.to_owned()),
+                conference_solution_key: Some(ConferenceSolutionKey {
+                    type_: Some("hangoutsMeet".to_owned()),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// What to tell Google about notifying people.
+///
+/// An invitation nobody is told about is worse than no invitation, so a guest
+/// list means mail goes out. With nobody invited there is nobody to notify,
+/// and `"none"` is passed explicitly rather than left to default because the
+/// API documents it as having effects of its own.
+fn send_updates(event: &NewEvent) -> &'static str {
+    if event.guests.is_empty() {
+        "none"
+    } else {
+        "all"
     }
 }
 
 fn midnight_utc(date: NaiveDate) -> DateTime<Utc> {
     date.and_hms_opt(0, 0, 0)
-        .expect("midnight exists for every date")
+        .expect("00:00 is a valid time of day")
         .and_utc()
+}
+
+impl WritableCalendar for GoogleProvider {
+    async fn create_event(
+        &self,
+        calendar_id: &str,
+        id: &str,
+        event: &NewEvent,
+    ) -> Result<String, SyncError> {
+        if !self.can_write() {
+            // Asking anyway would spend a round trip to be told the same, and
+            // the message Google returns is less useful than this one.
+            return Err(SyncError::Forbidden);
+        }
+
+        let (_, created) = self
+            .hub
+            .events()
+            .insert(to_google_event(id, event), &encode_calendar_id(calendar_id))
+            .send_updates(send_updates(event))
+            // Without this the request succeeds with the `conferenceData`
+            // silently dropped: no error, no link. Set whether or not a call
+            // was asked for, so the failure mode can't come back.
+            .conference_data_version(1)
+            .add_scopes(self.access.scopes())
+            .doit()
+            .await
+            .context("events.insert")
+            .map_err(classify)?;
+
+        // Google echoes the id back; falling back to the one we chose keeps
+        // the caller able to find the event either way. The conference URL is
+        // deliberately not read here: Google generates it asynchronously and
+        // the insert response often has none yet. The resync that follows a
+        // save is what picks it up.
+        Ok(created.id.unwrap_or_else(|| id.to_owned()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use google_calendar3::api::{ConferenceData, EntryPoint, EventOrganizer};
+    use google_calendar3::api::{EntryPoint, EventOrganizer};
 
     use super::*;
 
@@ -965,6 +1121,83 @@ mod tests {
         assert_eq!(mapped.attendees.len(), 1, "the resource row is dropped");
         assert_eq!(mapped.attendees[0].response, Response::Accepted);
         assert!(mapped.attendees[0].is_self);
+    }
+
+    /// A minimal event to create, which each test then varies.
+    fn new_event() -> NewEvent {
+        NewEvent {
+            summary: "Design review".to_owned(),
+            start: EventTime::Date(NaiveDate::from_ymd_opt(2026, 10, 20).expect("valid date")),
+            end: EventTime::Date(NaiveDate::from_ymd_opt(2026, 10, 21).expect("valid date")),
+            location: None,
+            description: None,
+            guests: Vec::new(),
+            conference: false,
+        }
+    }
+
+    #[test]
+    fn guests_become_attendees() {
+        let mut event = new_event();
+        event.guests = vec!["sam@example.com".to_owned(), "alex@example.com".to_owned()];
+        let sent = to_google_event("abc", &event);
+        let attendees = sent.attendees.expect("an attendee list");
+        assert_eq!(
+            attendees
+                .iter()
+                .map(|attendee| attendee.email.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["sam@example.com", "alex@example.com"]
+        );
+    }
+
+    #[test]
+    fn inviting_nobody_sends_no_attendee_list_at_all() {
+        // An empty array and an absent field mean the same thing to Google,
+        // but the absent one is what an uninvited event actually is.
+        assert!(to_google_event("abc", &new_event()).attendees.is_none());
+    }
+
+    #[test]
+    fn a_guest_list_means_google_sends_the_invitations() {
+        let mut event = new_event();
+        assert_eq!(send_updates(&event), "none", "nobody to notify");
+        event.guests = vec!["sam@example.com".to_owned()];
+        assert_eq!(
+            send_updates(&event),
+            "all",
+            "an invitation nobody is told about is worse than none"
+        );
+    }
+
+    #[test]
+    fn asking_for_a_video_call_sends_a_meet_create_request() {
+        let mut event = new_event();
+        event.conference = true;
+        let sent = to_google_event("abc123", &event);
+        let request = sent
+            .conference_data
+            .expect("conference data")
+            .create_request
+            .expect("a create request");
+        assert_eq!(
+            request.conference_solution_key.and_then(|key| key.type_),
+            Some("hangoutsMeet".to_owned())
+        );
+        assert_eq!(
+            request.request_id.as_deref(),
+            Some("abc123"),
+            "the event id doubles as the request id, so a retry reuses the call"
+        );
+    }
+
+    #[test]
+    fn an_event_with_no_video_call_sends_no_conference_data() {
+        assert!(
+            to_google_event("abc", &new_event())
+                .conference_data
+                .is_none()
+        );
     }
 
     /// A Teams invitation as Google stores one composed in Outlook: HTML,
