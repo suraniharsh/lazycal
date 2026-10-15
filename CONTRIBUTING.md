@@ -40,8 +40,18 @@ CI runs exactly these, so a green local run should mean a green CI run.
 - **Don't hold a database lock across an `.await`.** The sync task shares its
   connection as `Arc<Mutex<Connection>>`; `rusqlite::Connection` is not `Sync`,
   so a guard held across a suspension point breaks `Send` for the whole future.
-- **Verify UI changes.** `cargo run --example preview` dumps the rendered
-  frames as text, which is usually enough to see a layout regression.
+- **Verify UI changes.** `cargo run --example demo` dumps the rendered frames
+  as text from invented data, which is usually enough to see a layout
+  regression, and is what the views in the README are generated from. Pass it
+  a date — `cargo run --example demo 2026-10-13` — when regenerating those,
+  or every dump shifts with today's date.
+  `cargo run --example preview` does the same against your own cache — don't
+  paste its output anywhere.
+- **Mind the local timezone.** Almost every bug here is a date-arithmetic bug,
+  and a test that seeds UTC instants but asserts about local days passes only
+  where the two agree. Seed wall-clock times in `Local`, and check your work
+  somewhere awkward: `TZ=Pacific/Chatham cargo test` (+12:45), or
+  `TZ=Pacific/Kiritimati cargo test` (+14:00). CI runs a spread of these.
 
 ## Reporting bugs
 
