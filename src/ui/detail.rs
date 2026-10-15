@@ -47,7 +47,14 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App, event: &EventView) {
 
     // Tell the key handler how far there is left to scroll; it has no other
     // way to know how tall the wrapped text turned out.
-    let overflow = draw_panel(frame, area, &event.summary, lines, app.detail_scroll);
+    let overflow = draw_panel(
+        frame,
+        area,
+        &event.summary,
+        lines,
+        app.detail_scroll,
+        crate::link::all(&detail).len(),
+    );
     app.record_detail_overflow(overflow);
 }
 
@@ -59,6 +66,7 @@ fn draw_panel(
     title: &str,
     lines: Vec<Line<'static>>,
     scroll: u16,
+    links: usize,
 ) -> u16 {
     let width = width_for(area);
     let popup = centered(area, width, lines.len() as u16 + 2);
@@ -70,7 +78,14 @@ fn draw_panel(
         ))
         // In the border, so a panel too short for every line can't hide the
         // way out of it.
-        .title_bottom(" esc to close \u{b7} tab for the next event ")
+        // Offered only when there is a link, so the panel doesn't name a key
+        // that has nothing to do on this event.
+        .title_bottom(match links {
+            0 => " esc to close \u{b7} tab for the next event ",
+            1 => " o to open \u{b7} esc to close \u{b7} tab for the next event ",
+            // Plural, because `o` asks which one rather than opening.
+            _ => " o to open a link \u{b7} esc to close \u{b7} tab for the next event ",
+        })
         .style(Style::default().fg(theme::ACCENT).bg(theme::BG));
     let inner = block.inner(popup);
 
@@ -145,6 +160,18 @@ fn body(
             wrap_to_width(location, value_width)
                 .into_iter()
                 .map(|text| vec![Span::styled(text, Style::default().fg(theme::TEXT))])
+                .collect(),
+        ));
+    }
+
+    // Its own row rather than folded into `Where`: a meeting can have a room
+    // and a link, and whichever lost that fight was the one you needed.
+    if let Some(url) = &detail.conference_url {
+        fields.push(labelled(
+            "Join",
+            wrap_to_width(url, value_width)
+                .into_iter()
+                .map(|text| vec![Span::styled(text, Style::default().fg(theme::ACCENT))])
                 .collect(),
         ));
     }
@@ -479,6 +506,8 @@ mod tests {
         let detail = EventDetail {
             description: Some("Agenda in the doc.".to_owned()),
             location: Some("meet.example.com/abc".to_owned()),
+            conference_url: None,
+            links: Vec::new(),
             organizer: Some(person("lead@example.com")),
             attendees: vec![
                 attendee("lead@example.com", Response::Accepted),
@@ -614,7 +643,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         terminal
             .draw(|frame| {
-                draw_panel(frame, frame.area(), "Standup", lines, scroll);
+                draw_panel(frame, frame.area(), "Standup", lines, scroll, 0);
             })
             .expect("draw");
 
@@ -696,7 +725,7 @@ mod tests {
         let mut reported = 0;
         terminal
             .draw(|frame| {
-                reported = draw_panel(frame, frame.area(), "Standup", plain(40), 0);
+                reported = draw_panel(frame, frame.area(), "Standup", plain(40), 0, 0);
             })
             .expect("draw");
         // 10 rows of screen, two spent on borders, so 8 are visible.
@@ -711,7 +740,7 @@ mod tests {
         // panel maths can't produce an out-of-bounds rect either way.
         terminal
             .draw(|frame| {
-                draw_panel(frame, frame.area(), "Standup", plain(10), 0);
+                draw_panel(frame, frame.area(), "Standup", plain(10), 0, 0);
             })
             .expect("draw must not panic on a tiny terminal");
     }

@@ -114,6 +114,18 @@ pub struct ProviderEvent {
     pub description: Option<String>,
     pub location: Option<String>,
     pub organizer: Option<Person>,
+    /// Where to join, when the event has a video call attached. Kept apart
+    /// from `location` because an event can have both a room and a link, and
+    /// folding one into the other loses whichever came second.
+    pub conference_url: Option<String>,
+    /// Every link the event carries, in the order a reader would meet them.
+    ///
+    /// Collected by the provider rather than scanned out of `description`
+    /// later, because this is the only point at which the links are all still
+    /// there: a service that sends an HTML body puts the real URL in an
+    /// `href`, and nothing but the anchor text survives into the plain text
+    /// the cache keeps.
+    pub links: Vec<String>,
     /// Empty when nobody was invited, which is every event in a holiday or
     /// fixtures feed.
     pub attendees: Vec<Attendee>,
@@ -198,14 +210,6 @@ impl From<anyhow::Error> for SyncError {
     }
 }
 
-/// A calendar service lazycal can read.
-///
-/// Implementations own their own paging: `sync_calendar` follows the service's
-/// pagination to the end and returns the accumulated changes, because a resume
-/// cursor is generally only valid once the whole stream has been consumed.
-/// The futures are explicitly `Send` because syncing runs in a spawned task.
-/// Spelling that out here means a provider whose future isn't `Send` fails at
-/// its own `impl` rather than at the far-away spawn site.
 pub trait CalendarProvider {
     /// Every calendar on the account.
     ///

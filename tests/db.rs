@@ -44,6 +44,8 @@ fn all_day_event(id: &str, summary: &str, start: NaiveDate, end: NaiveDate) -> C
         description: None,
         location: None,
         organizer: None,
+        conference_url: None,
+        links: Vec::new(),
         attendees: Vec::new(),
     })
 }
@@ -60,6 +62,8 @@ fn timed_event(id: &str, summary: &str, start: NaiveDate, hour: u32) -> Change {
         description: None,
         location: None,
         organizer: None,
+        conference_url: None,
+        links: Vec::new(),
         attendees: Vec::new(),
     })
 }
@@ -78,6 +82,8 @@ fn open_creates_and_migrates_a_database_file() {
         "location",
         "organizer_email",
         "attendees",
+        "conference_url",
+        "links",
     ] {
         assert!(
             event_columns.contains(&added.to_owned()),
@@ -355,6 +361,8 @@ fn apply_records_a_resolved_event_color() {
             description: None,
             location: None,
             organizer: None,
+            conference_url: None,
+            links: Vec::new(),
             attendees: Vec::new(),
         }
     });
@@ -437,6 +445,11 @@ fn detail_fields_survive_a_round_trip() {
     let event = upsert(ProviderEvent {
         description: Some("Agenda in the doc.".to_owned()),
         location: Some("Meeting room 2".to_owned()),
+        conference_url: Some("https://meet.example.com/abc-defg-hij".to_owned()),
+        links: vec![
+            "https://meet.example.com/abc-defg-hij".to_owned(),
+            "https://notes.example.com/agenda".to_owned(),
+        ],
         organizer: Some(Person {
             name: Some("Lead".to_owned()),
             email: Some("lead@example.com".to_owned()),
@@ -470,6 +483,19 @@ fn detail_fields_survive_a_round_trip() {
         .expect("the event is cached");
     assert_eq!(detail.description.as_deref(), Some("Agenda in the doc."));
     assert_eq!(detail.location.as_deref(), Some("Meeting room 2"));
+    assert_eq!(
+        detail.conference_url.as_deref(),
+        Some("https://meet.example.com/abc-defg-hij"),
+        "a room and a link are both kept"
+    );
+    assert_eq!(
+        detail.links,
+        [
+            "https://meet.example.com/abc-defg-hij".to_owned(),
+            "https://notes.example.com/agenda".to_owned(),
+        ],
+        "the whole list round-trips, in order"
+    );
     assert_eq!(
         detail.organizer.as_ref().map(|person| person.label()),
         Some("Lead")
@@ -532,6 +558,8 @@ fn plain_event() -> ProviderEvent {
         description: None,
         location: None,
         organizer: None,
+        conference_url: None,
+        links: Vec::new(),
         attendees: Vec::new(),
     }
 }

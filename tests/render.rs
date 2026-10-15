@@ -69,6 +69,8 @@ fn busy_app() -> (App, tempfile::TempDir, NaiveDate) {
         description: None,
         location: None,
         organizer: None,
+        conference_url: None,
+        links: Vec::new(),
         attendees: Vec::new(),
     };
 
@@ -85,6 +87,8 @@ fn busy_app() -> (App, tempfile::TempDir, NaiveDate) {
             id: "standup".to_owned(),
             summary: "Standup with a title long enough to need truncating".to_owned(),
             location: Some("Meeting room 2".to_owned()),
+            conference_url: Some("https://meet.example.com/abc-defg-hij".to_owned()),
+            links: Vec::new(),
             description: Some("Agenda.\n\n".to_owned() + &"detail ".repeat(200)),
             organizer: Some(Person {
                 name: Some("Lead".to_owned()),
@@ -224,7 +228,12 @@ fn the_detail_panel_reports_what_it_holds() {
 
     let detail = app.event_detail(&event);
     assert_eq!(detail.attendees.len(), 30);
+    // Both, not one or the other: they shared a column once and the room won.
     assert_eq!(detail.location.as_deref(), Some("Meeting room 2"));
+    assert_eq!(
+        detail.conference_url.as_deref(),
+        Some("https://meet.example.com/abc-defg-hij")
+    );
     assert!(detail.description.is_some());
 }
 
@@ -365,6 +374,8 @@ fn crowded_app(count: u32) -> (App, tempfile::TempDir, NaiveDate) {
             description: None,
             location: None,
             organizer: None,
+            conference_url: None,
+            links: Vec::new(),
             attendees: Vec::new(),
         };
         db::events::apply(&conn, "cal-1", &Change::Upsert(Box::new(event))).expect("apply");
@@ -373,6 +384,24 @@ fn crowded_app(count: u32) -> (App, tempfile::TempDir, NaiveDate) {
 
     let app = App::open(&path).expect("open app");
     (app, dir, on)
+}
+
+#[test]
+fn the_detail_panel_shows_a_room_and_a_link_separately() {
+    let (mut app, _dir, on) = busy_app();
+    app.selected = on;
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    let event = app.cursor_event().expect("an event under the cursor");
+    assert!(event.summary.starts_with("Standup"), "{}", event.summary);
+
+    press(&mut app, KeyCode::Enter);
+    let rendered = rendered_text(&app, 100, 30);
+    assert!(rendered.contains("Where"), "{rendered}");
+    assert!(rendered.contains("Meeting room 2"), "{rendered}");
+    assert!(rendered.contains("Join"), "{rendered}");
+    assert!(rendered.contains("meet.example.com"), "{rendered}");
 }
 
 #[test]
@@ -428,4 +457,361 @@ thread_local! {
     /// What the stand-in opener was last handed, so a test can press `o`
     /// without a browser appearing on whoever is running the suite.
     static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn record_open(url: &str) -> anyhow::Result<()> {
+    OPENED.with(|opened| opened.borrow_mut().push(url.to_owned()));
+    Ok(())
+}
+
+fn fail_to_open(_: &str) -> anyhow::Result<()> {
+    Err(anyhow::anyhow!("no browser here"))
+}
+
+fn opened() -> Vec<String> {
+    OPENED.with(|opened| opened.borrow().clone())
+}
+
+#[test]
+fn o_opens_the_link_on_the_event_under_the_cursor() {
+    let (mut app, _dir, on) = busy_app();
+    app.selected = on;
+    app.set_opener(record_open);
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    let event = app.cursor_event().expect("an event under the cursor");
+    assert!(event.summary.starts_with("Standup"), "{}", event.summary);
+
+    press(&mut app, KeyCode::Char('o'));
+    assert_eq!(opened(), ["https://meet.example.com/abc-defg-hij"]);
+    assert_eq!(app.flash(), Some("opening the link\u{2026}"));
+}
+
+#[test]
+fn o_works_with_the_detail_panel_open_too() {
+    let (mut app, _dir, on) = busy_app();
+    app.selected = on;
+    app.set_opener(record_open);
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.show_detail);
+
+    press(&mut app, KeyCode::Char('o'));
+    assert_eq!(opened().len(), 1, "{:?}", opened());
+    assert!(app.show_detail, "opening a link does not close the panel");
+}
+
+#[test]
+fn an_event_with_no_link_says_so_rather_than_doing_nothing() {
+    let (mut app, _dir, on) = busy_app();
+    app.selected = on;
+    app.set_opener(record_open);
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Tab);
+    let event = app.cursor_event().expect("an event under the cursor");
+    assert!(event.all_day, "the all-day event, which has no link");
+
+    press(&mut app, KeyCode::Char('o'));
+    assert!(opened().is_empty(), "nothing was launched");
+    assert_eq!(app.flash(), Some("no link on this event"));
+    // The message is in the footer, not just in the struct.
+    assert!(
+        rendered_text(&app, 100, 30).contains("no link on this event"),
+        "{}",
+        rendered_text(&app, 100, 30)
+    );
+}
+
+#[test]
+fn o_with_nothing_selected_says_what_to_do_instead() {
+    // An empty cache, so there is certainly no cursor to have a link.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut app = App::open(&dir.path().join("cache.db")).expect("open app");
+    app.set_opener(record_open);
+    assert!(app.cursor_event().is_none(), "nothing to select");
+
+    press(&mut app, KeyCode::Char('o'));
+    assert!(opened().is_empty());
+    assert_eq!(
+        app.flash(),
+        Some("no event selected \u{2014} tab to pick one")
+    );
+    assert!(rendered_text(&app, 100, 30).contains("no event selected"));
+}
+
+#[test]
+fn an_opener_that_fails_is_reported_in_the_footer() {
+    let (mut app, _dir, on) = busy_app();
+    app.selected = on;
+    app.set_opener(fail_to_open);
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Char('o'));
+
+    let flash = app.flash().expect("a complaint");
+    assert!(flash.starts_with("could not open it:"), "{flash}");
+    assert!(rendered_text(&app, 100, 30).contains("could not open"));
+}
+
+#[test]
+fn the_footers_answer_clears_on_the_next_key() {
+    let (mut app, _dir, on) = busy_app();
+    app.selected = on;
+    app.set_opener(record_open);
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Char('o'));
+    assert!(app.flash().is_some());
+    press(&mut app, KeyCode::Char('l'));
+    assert_eq!(
+        app.flash(),
+        None,
+        "it answered the key before, not this one"
+    );
+    assert!(
+        rendered_text(&app, 200, 40).contains("m/w/d/a: view"),
+        "the hints come back"
+    );
+}
+
+#[test]
+fn the_open_key_is_only_advertised_when_there_is_something_to_open() {
+    let (mut app, _dir, on) = busy_app();
+    app.selected = on;
+    press(&mut app, KeyCode::Char('d'));
+
+    press(&mut app, KeyCode::Tab);
+    assert!(
+        app.cursor_links().is_empty(),
+        "the all-day event has no link"
+    );
+    let without = rendered_text(&app, 200, 40);
+    assert!(!without.contains("o: open"), "{without}");
+
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(app.cursor_links().len(), 1, "the standup has exactly one");
+    let with = rendered_text(&app, 200, 40);
+    assert!(with.contains("o: open"), "{with}");
+
+    // And the detail panel's own border says it.
+    press(&mut app, KeyCode::Enter);
+    assert!(rendered_text(&app, 100, 30).contains("o to open"));
+}
+
+#[test]
+fn a_link_pasted_in_the_body_is_what_o_opens() {
+    // Invitations from other people arrive as prose with a link in it, which
+    // is the common case rather than the exception.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cache.db");
+    let conn = db::open(&path).expect("open db");
+    db::calendars::upsert_calendar(&conn, "cal-1", "Work", None, true).expect("calendar");
+    let on = date(2026, 10, 12);
+    db::events::apply(
+        &conn,
+        "cal-1",
+        &Change::Upsert(Box::new(ProviderEvent {
+            id: "zoom".to_owned(),
+            summary: "Vendor call".to_owned(),
+            start: EventTime::Instant(local(on, 10, 0)),
+            end: EventTime::Instant(local(on, 11, 0)),
+            status: EventStatus::Confirmed,
+            color: None,
+            description: Some(
+                "Dial in:\nhttps://example.zoom.us/j/123456789?pwd=abc\nOr by phone.".to_owned(),
+            ),
+            location: Some("Zoom".to_owned()),
+            conference_url: None,
+            links: Vec::new(),
+            organizer: None,
+            attendees: Vec::new(),
+        })),
+    )
+    .expect("apply");
+    drop(conn);
+
+    let mut app = App::open(&path).expect("open app");
+    app.selected = on;
+    app.set_opener(record_open);
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Char('o'));
+    assert_eq!(opened(), ["https://example.zoom.us/j/123456789?pwd=abc"]);
+}
+
+/// A cache holding one event with `count` links on it, as a sync would.
+fn linked_app(count: usize) -> (App, tempfile::TempDir, NaiveDate) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cache.db");
+    let conn = db::open(&path).expect("open db");
+    db::calendars::upsert_calendar(&conn, "cal-1", "Work", None, true).expect("calendar");
+    let on = date(2026, 10, 12);
+    db::events::apply(
+        &conn,
+        "cal-1",
+        &Change::Upsert(Box::new(ProviderEvent {
+            id: "teams".to_owned(),
+            summary: "Vendor sync".to_owned(),
+            start: EventTime::Instant(local(on, 10, 0)),
+            end: EventTime::Instant(local(on, 11, 0)),
+            status: EventStatus::Confirmed,
+            color: None,
+            description: Some("Click here to join the meeting".to_owned()),
+            location: None,
+            conference_url: None,
+            links: (0..count)
+                .map(|index| format!("https://example{index}.com/join"))
+                .collect(),
+            organizer: None,
+            attendees: Vec::new(),
+        })),
+    )
+    .expect("apply");
+    drop(conn);
+
+    let mut app = App::open(&path).expect("open app");
+    app.selected = on;
+    app.set_opener(record_open);
+    press(&mut app, KeyCode::Char('d'));
+    press(&mut app, KeyCode::Tab);
+    (app, dir, on)
+}
+
+#[test]
+fn one_link_opens_without_asking() {
+    let (mut app, _dir, _on) = linked_app(1);
+    press(&mut app, KeyCode::Char('o'));
+    assert!(app.link_choice().is_none(), "no question worth asking");
+    assert_eq!(opened(), ["https://example0.com/join"]);
+}
+
+#[test]
+fn several_links_ask_which_one() {
+    let (mut app, _dir, _on) = linked_app(3);
+    press(&mut app, KeyCode::Char('o'));
+    assert!(opened().is_empty(), "nothing opened until one was chosen");
+
+    let choice = app.link_choice().expect("the chooser is up");
+    assert_eq!(choice.links.len(), 3);
+    assert_eq!(choice.highlighted, 0);
+
+    let rendered = rendered_text(&app, 100, 30);
+    assert!(rendered.contains("Open which link?"), "{rendered}");
+    for index in 0..3 {
+        assert!(
+            rendered.contains(&format!("{}. https://example{index}.com/join", index + 1)),
+            "{rendered}"
+        );
+    }
+
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.link_choice().expect("still up").highlighted, 2);
+    press(&mut app, KeyCode::Enter);
+    assert!(app.link_choice().is_none(), "it closed after choosing");
+    assert_eq!(opened(), ["https://example2.com/join"]);
+}
+
+#[test]
+fn the_chooser_wraps_at_both_ends() {
+    let (mut app, _dir, _on) = linked_app(3);
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(
+        app.link_choice().expect("up").highlighted,
+        2,
+        "wrapped back"
+    );
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(app.link_choice().expect("up").highlighted, 0, "and forward");
+}
+
+#[test]
+fn a_digit_opens_that_link_directly() {
+    let (mut app, _dir, _on) = linked_app(3);
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('2'));
+    assert_eq!(opened(), ["https://example1.com/join"]);
+    assert!(app.link_choice().is_none());
+}
+
+#[test]
+fn a_digit_past_the_end_of_the_list_does_nothing() {
+    let (mut app, _dir, _on) = linked_app(2);
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Char('9'));
+    assert!(opened().is_empty());
+    assert!(app.link_choice().is_some(), "the question is still open");
+}
+
+#[test]
+fn esc_cancels_the_chooser_without_opening_anything() {
+    let (mut app, _dir, _on) = linked_app(2);
+    press(&mut app, KeyCode::Char('o'));
+    press(&mut app, KeyCode::Esc);
+    assert!(app.link_choice().is_none());
+    assert!(opened().is_empty());
+}
+
+#[test]
+fn the_chooser_swallows_keys_that_would_otherwise_navigate() {
+    // Navigating behind it would leave it asking about an event that is no
+    // longer selected.
+    let (mut app, _dir, on) = linked_app(2);
+    press(&mut app, KeyCode::Char('o'));
+    for code in [
+        KeyCode::Char('l'),
+        KeyCode::Char('m'),
+        KeyCode::Char('t'),
+        KeyCode::Char('?'),
+    ] {
+        press(&mut app, code);
+    }
+    assert_eq!(app.selected, on, "the date did not move");
+    assert!(!app.show_help, "the help overlay did not open");
+    assert!(app.link_choice().is_some(), "and the question is still up");
+}
+
+#[test]
+fn ctrl_c_still_quits_with_the_chooser_up() {
+    let (mut app, _dir, _on) = linked_app(2);
+    press(&mut app, KeyCode::Char('o'));
+    app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.should_quit);
+}
+
+#[test]
+fn the_footer_says_whether_o_will_ask() {
+    let (app, _dir, _on) = linked_app(1);
+    assert!(rendered_text(&app, 200, 40).contains("o: open"));
+    assert!(!rendered_text(&app, 200, 40).contains("o: open\u{2026}"));
+
+    let (app, _dir, _on) = linked_app(3);
+    assert!(rendered_text(&app, 200, 40).contains("o: open\u{2026}"));
+}
+
+#[test]
+fn the_detail_panel_says_so_too() {
+    let (mut app, _dir, _on) = linked_app(3);
+    press(&mut app, KeyCode::Enter);
+    assert!(rendered_text(&app, 100, 30).contains("o to open a link"));
+
+    let (mut app, _dir, _on) = linked_app(1);
+    press(&mut app, KeyCode::Enter);
+    let rendered = rendered_text(&app, 100, 30);
+    assert!(rendered.contains("o to open"), "{rendered}");
+    assert!(!rendered.contains("o to open a link"), "{rendered}");
+}
+
+#[test]
+fn the_chooser_draws_at_every_size() {
+    let (mut app, _dir, _on) = linked_app(4);
+    press(&mut app, KeyCode::Char('o'));
+    for (width, height) in SIZES {
+        draw_at(&app, width, height);
+    }
 }

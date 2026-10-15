@@ -4,6 +4,7 @@ pub mod config;
 pub mod data;
 pub mod db;
 pub mod google;
+pub mod link;
 pub mod provider;
 pub mod sync;
 pub mod text;

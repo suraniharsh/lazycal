@@ -304,6 +304,8 @@ fn to_change(event: &Event) -> Option<Change> {
             };
             (!person.is_anonymous()).then_some(person)
         }),
+        conference_url: conference_url(event),
+        links: links(event),
         attendees: event
             .attendees
             .as_deref()
@@ -312,6 +314,121 @@ fn to_change(event: &Event) -> Option<Change> {
             .filter_map(to_attendee)
             .collect(),
     })))
+}
+
+/// How many links to keep from one event.
+///
+/// A long invitation can carry a dozen — unsubscribe footers, help pages,
+/// privacy notices — and the picker is for choosing between a handful.
+const MAX_LINKS: usize = 8;
+
+/// Every link on an event, in the order a reader would meet them.
+///
+/// The `href` attributes come first and they are the point of this function.
+/// Google stores a description composed in any rich-text client as HTML, and
+/// a Teams or Zoom invitation written there puts the real URL in an `href`
+/// behind words like "Click here to join the meeting". `plain_text` keeps the
+/// words and drops the tag, so by the time anything downstream sees the
+/// description the URL is simply gone. This is the only place it still
+/// exists.
+fn links(event: &Event) -> Vec<String> {
+    let raw = event.description.as_deref().unwrap_or_default();
+    // The sweep reads the *rendered* text, not the markup. Scanning the
+    // markup finds every URL twice — once decoded out of its `href` and once
+    // still escaped in the source — and picks up `src` attributes besides.
+    let readable = plain_text(raw);
+    let location = event.location.as_deref().unwrap_or_default();
+
+    let mut links: Vec<String> = Vec::new();
+    let candidates = conference_url(event)
+        .into_iter()
+        .chain(hrefs(raw))
+        .chain(
+            crate::link::urls_in(&readable)
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .chain(
+            crate::link::urls_in(location)
+                .into_iter()
+                .map(str::to_owned),
+        );
+
+    for url in candidates {
+        if crate::link::is_openable(&url) && !links.contains(&url) {
+            links.push(url);
+        }
+        if links.len() == MAX_LINKS {
+            break;
+        }
+    }
+    links
+}
+
+/// The `href` of every anchor in some HTML, in document order.
+///
+/// A deliberately small scanner rather than a parser: it looks for `href=`
+/// inside a tag and takes the quoted value. Anything it can't make sense of
+/// is skipped, and `urls_in` still sweeps the text afterwards.
+fn hrefs(html: &str) -> Vec<String> {
+    let lowered = html.to_ascii_lowercase();
+    let mut found = Vec::new();
+    let mut at = 0;
+
+    while let Some(offset) = lowered[at..].find("href") {
+        let name_at = at + offset;
+        let start = name_at + "href".len();
+        at = start;
+        // `data-xhref=` ends in "href" without being it, so the character
+        // before has to be one that can't be part of an attribute name.
+        if html[..name_at]
+            .chars()
+            .next_back()
+            .is_some_and(|before| before.is_alphanumeric() || matches!(before, '-' | '_' | ':'))
+        {
+            continue;
+        }
+        let rest = &html[start..];
+        let Some(equals) = rest.find('=') else { break };
+        // Only whitespace may sit between the name and the `=`, or this was
+        // some other attribute that merely ends in "href".
+        if !rest[..equals].chars().all(char::is_whitespace) {
+            continue;
+        }
+        let value = rest[equals + 1..].trim_start();
+        let url = match value.chars().next() {
+            Some(quote @ ('"' | '\'')) => value[1..].split(quote).next().unwrap_or_default(),
+            // Unquoted, which is legal HTML and ends at whitespace or `>`.
+            Some(_) => value
+                .split(|c: char| c.is_whitespace() || c == '>')
+                .next()
+                .unwrap_or_default(),
+            None => break,
+        };
+        at = start + equals + 1 + url.len();
+        if !url.is_empty() {
+            found.push(unescape(url));
+        }
+    }
+    found
+}
+
+/// The URL to join an event's video call.
+///
+/// `conferenceData` is the current field and carries one entry point per way
+/// in — a URL, a phone number, a SIP address — so the video one is picked out
+/// by type. `hangoutLink` is the older field, still populated for Meet, and
+/// is the fallback for anything synced before conferencing was read.
+fn conference_url(event: &Event) -> Option<String> {
+    event
+        .conference_data
+        .as_ref()
+        .and_then(|data| data.entry_points.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .find(|entry| entry.entry_point_type.as_deref() == Some("video"))
+        .and_then(|entry| text(entry.uri.as_deref()))
+        .or_else(|| text(event.hangout_link.as_deref()))
 }
 
 /// Trims an optional string and discards it if nothing is left, so a blank
@@ -527,7 +644,7 @@ fn midnight_utc(date: NaiveDate) -> DateTime<Utc> {
 
 #[cfg(test)]
 mod tests {
-    use google_calendar3::api::EventOrganizer;
+    use google_calendar3::api::{ConferenceData, EntryPoint, EventOrganizer};
 
     use super::*;
 
@@ -848,6 +965,225 @@ mod tests {
         assert_eq!(mapped.attendees.len(), 1, "the resource row is dropped");
         assert_eq!(mapped.attendees[0].response, Response::Accepted);
         assert!(mapped.attendees[0].is_self);
+    }
+
+    /// A Teams invitation as Google stores one composed in Outlook: HTML,
+    /// with the real URL behind the words "Click here to join the meeting".
+    const TEAMS_URL: &str = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_NzY4OTRkYTk@thread.v2/0?context=%7b%22Tid%22%3a%22aaaa%22%7d";
+
+    #[test]
+    fn a_teams_link_behind_anchor_text_survives_the_sync() {
+        // This is the case that was silently lost: `plain_text` keeps the
+        // words and drops the tag, so without `links` the URL reached nothing
+        // downstream and the event looked like it had no way in.
+        let mut event = event_fixture();
+        event.description = Some(format!(
+            "<div>Microsoft Teams meeting</div>\
+             <div><a href=\"{TEAMS_URL}\">Click here to join the meeting</a></div>\
+             <div>Meeting ID: 123 456 789</div>"
+        ));
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(mapped.links, [TEAMS_URL.to_owned()]);
+        assert!(
+            mapped
+                .description
+                .as_deref()
+                .is_some_and(|text| text.contains("Click here to join the meeting")),
+            "the readable text is still the readable text"
+        );
+        assert!(
+            mapped
+                .description
+                .as_deref()
+                .is_some_and(|text| !text.contains("teams.microsoft.com")),
+            "and the URL is not inlined into it"
+        );
+    }
+
+    #[test]
+    fn the_outlook_plain_text_form_is_found_too() {
+        // Not every invitation is HTML. Outlook's text version puts the URL
+        // in angle brackets with no space before them.
+        let mut event = event_fixture();
+        event.description = Some(format!(
+            "Microsoft Teams meeting\nClick here to join the meeting<{TEAMS_URL}>\nMeeting ID: 1"
+        ));
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(mapped.links, [TEAMS_URL.to_owned()]);
+    }
+
+    #[test]
+    fn every_link_on_an_invitation_is_kept_in_reading_order() {
+        let mut event = event_fixture();
+        event.location = Some("https://maps.example.com/office".to_owned());
+        event.description = Some(format!(
+            "<a href=\"{TEAMS_URL}\">Click here to join the meeting</a>\
+             <a href=\"https://aka.ms/JoinTeamsMeeting\">Learn More</a>\
+             <div>Agenda: https://notes.example.com/agenda.</div>"
+        ));
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(
+            mapped.links,
+            [
+                TEAMS_URL.to_owned(),
+                "https://aka.ms/JoinTeamsMeeting".to_owned(),
+                "https://notes.example.com/agenda".to_owned(),
+                "https://maps.example.com/office".to_owned(),
+            ],
+            "hrefs, then the body text, then the location"
+        );
+    }
+
+    #[test]
+    fn the_conferencing_link_leads_the_list() {
+        let mut event = event_fixture();
+        event.hangout_link = Some("https://meet.google.com/abc-defg-hij".to_owned());
+        event.description = Some("<a href=\"https://notes.example.com/x\">Notes</a>".to_owned());
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(mapped.links[0], "https://meet.google.com/abc-defg-hij");
+    }
+
+    #[test]
+    fn a_link_written_twice_is_listed_once() {
+        // Google's own invitations put the Meet URL in `hangoutLink`, in an
+        // anchor, and again as the anchor's text.
+        let mut event = event_fixture();
+        event.hangout_link = Some("https://meet.google.com/abc".to_owned());
+        event.description = Some(
+            "<a href=\"https://meet.google.com/abc\">https://meet.google.com/abc</a>".to_owned(),
+        );
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(mapped.links, ["https://meet.google.com/abc".to_owned()]);
+    }
+
+    #[test]
+    fn a_hostile_scheme_in_an_href_is_not_collected() {
+        let mut event = event_fixture();
+        event.description = Some(
+            "<a href=\"file:///etc/passwd\">Open</a><a href=\"javascript:alert(1)\">Click</a>\
+             <a href=\"https://example.com/ok\">Fine</a>"
+                .to_owned(),
+        );
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(mapped.links, ["https://example.com/ok".to_owned()]);
+    }
+
+    #[test]
+    fn an_html_entity_in_an_href_is_decoded() {
+        // Google escapes the query separators when it stores the body.
+        let mut event = event_fixture();
+        event.description =
+            Some("<a href=\"https://example.com/a?x=1&amp;y=2\">Join</a>".to_owned());
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(mapped.links, ["https://example.com/a?x=1&y=2".to_owned()]);
+    }
+
+    #[test]
+    fn the_href_scanner_copes_with_the_shapes_html_allows() {
+        assert_eq!(
+            hrefs("<a href='https://example.com/a'>x</a>"),
+            ["https://example.com/a".to_owned()],
+            "single quotes"
+        );
+        assert_eq!(
+            hrefs("<a href=https://example.com/a>x</a>"),
+            ["https://example.com/a".to_owned()],
+            "unquoted"
+        );
+        assert_eq!(
+            hrefs("<a  href =  \"https://example.com/a\" >x</a>"),
+            ["https://example.com/a".to_owned()],
+            "whitespace around the equals"
+        );
+        assert!(
+            hrefs("<div data-xhref=\"https://example.com/a\">x</div>").is_empty(),
+            "an attribute that merely ends in href is not one"
+        );
+        assert!(hrefs("no markup at all").is_empty());
+        assert!(hrefs("<a href=\"\">empty</a>").is_empty());
+        assert!(hrefs("<a href").is_empty(), "truncated, and must not loop");
+    }
+
+    #[test]
+    fn a_long_invitation_does_not_keep_every_link_it_has() {
+        let mut event = event_fixture();
+        let many: String = (0..20)
+            .map(|index| format!("<a href=\"https://example.com/{index}\">x</a>"))
+            .collect();
+        event.description = Some(many);
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(mapped.links.len(), MAX_LINKS);
+    }
+
+    #[test]
+    fn an_event_with_nothing_to_open_has_no_links() {
+        let mut event = event_fixture();
+        event.description = Some("Bring notes. Room 2.".to_owned());
+        event.location = Some("Meeting room 2".to_owned());
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert!(mapped.links.is_empty());
+    }
+
+    #[test]
+    fn an_older_hangout_link_is_still_read_as_the_way_in() {
+        // `hangoutLink` predates `conferenceData` and is still populated for
+        // Meet, so it remains the fallback.
+        let mut event = event_fixture();
+        event.location = None;
+        event.hangout_link = Some("https://meet.google.com/abc-defg-hij".to_owned());
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(
+            mapped.conference_url.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
+        assert_eq!(mapped.location, None, "a link is not a place");
+    }
+
+    #[test]
+    fn the_video_entry_point_is_preferred_over_the_phone_one() {
+        let mut event = event_fixture();
+        event.conference_data = Some(ConferenceData {
+            entry_points: Some(vec![
+                EntryPoint {
+                    entry_point_type: Some("phone".to_owned()),
+                    uri: Some("tel:+1-555-0100".to_owned()),
+                    ..Default::default()
+                },
+                EntryPoint {
+                    entry_point_type: Some("video".to_owned()),
+                    uri: Some("https://meet.google.com/xyz-1234-abc".to_owned()),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        });
+        // Set too, and ignored: `conferenceData` is the current field.
+        event.hangout_link = Some("https://meet.google.com/stale".to_owned());
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(
+            mapped.conference_url.as_deref(),
+            Some("https://meet.google.com/xyz-1234-abc")
+        );
+    }
+
+    #[test]
+    fn a_room_and_a_link_both_survive() {
+        // The two used to share one field, and the room won.
+        let mut event = event_fixture();
+        event.location = Some("Meeting room 2".to_owned());
+        event.hangout_link = Some("https://meet.google.com/abc-defg-hij".to_owned());
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(mapped.location.as_deref(), Some("Meeting room 2"));
+        assert_eq!(
+            mapped.conference_url.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
+    }
+
+    #[test]
+    fn an_event_with_no_conferencing_has_no_join_url() {
+        let mapped = upserted(to_change(&event_fixture()).expect("a change"));
+        assert_eq!(mapped.conference_url, None);
     }
 
     #[test]

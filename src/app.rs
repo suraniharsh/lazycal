@@ -13,6 +13,7 @@ use crate::clock::Clock;
 use crate::data::{self, EventView};
 use crate::db;
 use crate::db::events::EventDetail;
+use crate::link;
 use crate::theme;
 
 /// Week rows in the month grid. Fixed so the grid's height doesn't jump
@@ -59,6 +60,13 @@ pub struct CalendarSummary {
     pub selected: bool,
 }
 
+/// An event's links, waiting for one to be chosen.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LinkChoice {
+    pub links: Vec<String>,
+    pub highlighted: usize,
+}
+
 pub struct App {
     pub view: View,
     pub selected: NaiveDate,
@@ -82,6 +90,17 @@ pub struct App {
     /// The minute the automatic cursor was last worked out for, so the cache
     /// is consulted once a minute rather than on every poll for input.
     cursor_minute: Option<i64>,
+    /// The links on the selected event and which one is highlighted, while
+    /// the chooser is open. `None` the rest of the time.
+    link_choice: Option<LinkChoice>,
+    /// What hands a URL to the system. Swappable only so the tests can press
+    /// `o` without opening a browser on whoever is running them.
+    opener: fn(&str) -> anyhow::Result<()>,
+    /// A one-line answer to the last key that had something to say, shown in
+    /// the footer until the next keypress. Opening a link is the case that
+    /// needs it: the browser appears on another workspace, or doesn't, and
+    /// either way the terminal has to account for what happened.
+    flash: Option<String>,
     /// Whether the event detail panel is covering the calendar.
     pub show_detail: bool,
     /// First visible line of the detail panel's body.
@@ -122,6 +141,9 @@ impl App {
             event_cursor: None,
             cursor_follows_clock: true,
             cursor_minute: None,
+            link_choice: None,
+            opener: link::open,
+            flash: None,
             show_detail: false,
             detail_scroll: 0,
             detail_overflow: Cell::new(0),
@@ -257,6 +279,100 @@ impl App {
                 EventDetail::default()
             }
         }
+    }
+
+    /// Every link on the event under the cursor, best first.
+    pub fn cursor_links(&self) -> Vec<String> {
+        let Some(event) = self.cursor_event() else {
+            return Vec::new();
+        };
+        link::all(&self.event_detail(&event))
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Opens the event's link, asking which one when there is more than one.
+    ///
+    /// A single link opens straight away: a chooser offering one row is a
+    /// keystroke that answers a question nobody asked. Three distinguishable
+    /// refusals, because "nothing happened" covers too much: no event
+    /// selected, no link on it, or an opener that failed.
+    pub fn open_link(&mut self) {
+        if self.cursor_event().is_none() {
+            self.flash = Some("no event selected \u{2014} tab to pick one".to_owned());
+            return;
+        }
+        let links = self.cursor_links();
+        match links.len() {
+            0 => self.flash = Some("no link on this event".to_owned()),
+            1 => self.launch(&links[0]),
+            _ => {
+                self.link_choice = Some(LinkChoice {
+                    links,
+                    highlighted: 0,
+                });
+            }
+        }
+    }
+
+    /// The links being chosen between, while the chooser is open.
+    pub fn link_choice(&self) -> Option<&LinkChoice> {
+        self.link_choice.as_ref()
+    }
+
+    fn on_key_link_choice(&mut self, code: KeyCode) {
+        let Some(choice) = self.link_choice.as_mut() else {
+            return;
+        };
+        let count = choice.links.len();
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('o') => self.link_choice = None,
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+                choice.highlighted = (choice.highlighted + 1) % count;
+            }
+            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
+                choice.highlighted = (choice.highlighted + count - 1) % count;
+            }
+            KeyCode::Enter => {
+                let url = choice.links[choice.highlighted].clone();
+                self.link_choice = None;
+                self.launch(&url);
+            }
+            // A digit opens that row directly, which is the quick way when
+            // the one you want is visible.
+            KeyCode::Char(digit @ '1'..='9') => {
+                let index = digit as usize - '1' as usize;
+                if let Some(url) = choice.links.get(index).cloned() {
+                    self.link_choice = None;
+                    self.launch(&url);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Hands one URL to the opener, reporting the outcome in the footer.
+    fn launch(&mut self, url: &str) {
+        match (self.opener)(url) {
+            // The URL is not echoed: it is a join link, and the footer is the
+            // part of the screen most likely to end up in a screenshot.
+            Ok(()) => self.flash = Some("opening the link\u{2026}".to_owned()),
+            Err(err) => {
+                tracing::warn!("opening {url}: {err:#}");
+                self.flash = Some(format!("could not open it: {err}"));
+            }
+        }
+    }
+
+    /// What the footer should say about the last key, if anything.
+    pub fn flash(&self) -> Option<&str> {
+        self.flash.as_deref()
+    }
+
+    /// Replaces what opens a link. For tests; the default is the real thing.
+    pub fn set_opener(&mut self, opener: fn(&str) -> anyhow::Result<()>) {
+        self.opener = opener;
     }
 
     pub fn calendar_name(&self, id: &str) -> Option<&str> {
@@ -451,6 +567,9 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        // Whatever the last key had to say has been read by now.
+        self.flash = None;
+
         // Raw mode turns off the terminal's own signal handling, so Ctrl-C and
         // Ctrl-D arrive as ordinary keys and have to be honored here.
         if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -471,6 +590,11 @@ impl App {
         // The chooser takes every key while it's up: it is a question, and
         // navigating the calendar behind it would leave it asking about an
         // event that is no longer selected.
+        if self.link_choice.is_some() {
+            self.on_key_link_choice(key.code);
+            return;
+        }
+
         // The overlay takes every key while it's up, so nothing navigates
         // invisibly behind it.
         if self.show_help {
@@ -496,6 +620,7 @@ impl App {
                 KeyCode::BackTab => self.move_event_cursor(false),
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_detail(1),
                 KeyCode::Char('k') | KeyCode::Up => self.scroll_detail(-1),
+                KeyCode::Char('o') => self.open_link(),
                 _ => {}
             }
             return;
@@ -519,6 +644,7 @@ impl App {
         match code {
             KeyCode::Char('c') => self.focus = Focus::Sidebar,
             KeyCode::Char('r') => self.refresh_requested = true,
+            KeyCode::Char('o') => self.open_link(),
             KeyCode::Char('m') => self.set_view(View::Month),
             KeyCode::Char('w') => self.set_view(View::Week),
             KeyCode::Char('d') => self.set_view(View::Day),
@@ -917,6 +1043,8 @@ mod tests {
                     color: None,
                     description: None,
                     location: None,
+                    conference_url: None,
+                    links: Vec::new(),
                     organizer: None,
                     attendees: Vec::new(),
                 }));
@@ -1224,6 +1352,8 @@ mod tests {
                 color: None,
                 description: None,
                 location: None,
+                conference_url: None,
+                links: Vec::new(),
                 organizer: None,
                 attendees: Vec::new(),
             }));

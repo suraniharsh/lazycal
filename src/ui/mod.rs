@@ -3,6 +3,7 @@ pub mod day;
 pub mod detail;
 pub mod help;
 pub mod month;
+pub mod picker;
 pub mod render;
 pub mod sidebar;
 pub mod timegrid;
@@ -15,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 use crate::app::{App, Focus, SyncStatus, View};
-use crate::text::display_width;
+use crate::text::{display_width, truncate_to_width};
 use crate::theme;
 
 const SIDEBAR_WIDTH: u16 = 26;
@@ -56,6 +57,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if app.show_help {
         help::draw(frame, area);
+    }
+    // Above both, and below the form: each of these takes every key while it
+    // is up, so neither may be covered by something that doesn't.
+    if let Some(choice) = app.link_choice() {
+        picker::draw(frame, area, &choice.links, choice.highlighted);
     }
 }
 
@@ -111,10 +117,16 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let [hints_area, status_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(reserved)]).areas(area);
 
-    let (text, color) = (
-        fit_hints(&hints_for(app), hints_area.width as usize),
-        theme::ACCENT,
-    );
+    let (text, color) = match app.flash() {
+        Some(flash) => (
+            truncate_to_width(flash, hints_area.width as usize),
+            theme::WARN,
+        ),
+        None => (
+            fit_hints(&hints_for(app), hints_area.width as usize),
+            theme::ACCENT,
+        ),
+    };
     frame.render_widget(
         Paragraph::new(Span::styled(text, Style::default().fg(color))),
         hints_area,
@@ -174,8 +186,16 @@ fn hints_for(app: &App) -> String {
     } else {
         "j/k: week"
     };
+    // `o` is only offered when there is actually something to open, so the
+    // footer isn't advertising a key that would answer "no link". With more
+    // than one it says so, because `o` then asks rather than opens.
+    let open = match app.cursor_links().len() {
+        0 => "",
+        1 => "   o: open",
+        _ => "   o: open\u{2026}",
+    };
     format!(
-        "m/w/d/a: view   h/l: day   {vertical}   enter: event   t: today   c: calendars   r: refresh"
+        "m/w/d/a: view   h/l: day   {vertical}   enter: event{open}   t: today   c: calendars   r: refresh"
     )
 }
 

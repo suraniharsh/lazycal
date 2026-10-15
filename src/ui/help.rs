@@ -33,6 +33,7 @@ const ENTRIES: &[Entry] = &[
     Key("", "the meeting on now, or next today, is marked"),
     Key("tab  shift-tab", "next / previous event"),
     Key("enter", "show where, who and notes"),
+    Key("o", "open its link, or choose when it has several"),
     // The panel's own bottom border says how to close it, so this list
     // doesn't spend one of its scarce rows repeating that.
     Key("j  k", "scroll a long description"),
@@ -166,6 +167,7 @@ mod tests {
             "esc",
             "space",
             "enter",
+            "o",
             "tab",
             "shift-tab",
             "PgUp",

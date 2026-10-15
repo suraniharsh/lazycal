@@ -44,6 +44,10 @@ pub fn init(conn: &Connection) -> Result<()> {
         add_column_if_missing(conn, "events", "organizer_name", "TEXT")?,
         add_column_if_missing(conn, "events", "organizer_email", "TEXT")?,
         add_column_if_missing(conn, "events", "attendees", "TEXT")?,
+        add_column_if_missing(conn, "events", "conference_url", "TEXT")?,
+        add_column_if_missing(conn, "events", "links", "TEXT")?,
+        add_column_if_missing(conn, "events", "conference_url", "TEXT")?,
+        add_column_if_missing(conn, "events", "links", "TEXT")?,
     ];
     if added.contains(&true) {
         // An incremental sync only reports events that changed, so everything

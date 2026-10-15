@@ -25,6 +25,10 @@ pub struct EventRow {
 pub struct EventDetail {
     pub description: Option<String>,
     pub location: Option<String>,
+    /// Where to join, when the event has a video call attached.
+    pub conference_url: Option<String>,
+    /// Every link on the event, best first. See [`crate::link`].
+    pub links: Vec<String>,
     pub organizer: Option<Person>,
     pub attendees: Vec<Attendee>,
 }
@@ -82,14 +86,28 @@ pub fn apply(conn: &Connection, calendar_id: &str, change: &Change) -> Result<()
         }
     };
     let organizer = event.organizer.clone().unwrap_or_default();
+    // Same reasoning as `attendees`: an empty list stores as NULL, which is
+    // every event in a holiday or fixtures feed that carries no link.
+    let links = if event.links.is_empty() {
+        None
+    } else {
+        match serde_json::to_string(&event.links) {
+            Ok(json) => Some(json),
+            Err(err) => {
+                tracing::warn!("encoding links for {}: {err}", event.id);
+                None
+            }
+        }
+    };
 
     conn.execute(
         "INSERT INTO events (
              calendar_id, id, summary, start_utc, end_utc,
              start_date, end_date, all_day, status, color_id,
-             description, location, organizer_name, organizer_email, attendees
+             description, location, organizer_name, organizer_email, attendees,
+             conference_url, links
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(calendar_id, id) DO UPDATE SET
              summary = excluded.summary,
              start_utc = excluded.start_utc,
@@ -103,7 +121,9 @@ pub fn apply(conn: &Connection, calendar_id: &str, change: &Change) -> Result<()
              location = excluded.location,
              organizer_name = excluded.organizer_name,
              organizer_email = excluded.organizer_email,
-             attendees = excluded.attendees",
+             attendees = excluded.attendees,
+             conference_url = excluded.conference_url,
+             links = excluded.links",
         params![
             calendar_id,
             event.id,
@@ -120,6 +140,8 @@ pub fn apply(conn: &Connection, calendar_id: &str, change: &Change) -> Result<()
             organizer.name,
             organizer.email,
             attendees,
+            event.conference_url,
+            links,
         ],
     )?;
     Ok(())
@@ -129,7 +151,8 @@ pub fn apply(conn: &Connection, calendar_id: &str, change: &Change) -> Result<()
 /// sync can remove the event the panel is open on.
 pub fn detail(conn: &Connection, calendar_id: &str, id: &str) -> Result<Option<EventDetail>> {
     let mut stmt = conn.prepare(
-        "SELECT description, location, organizer_name, organizer_email, attendees
+        "SELECT description, location, organizer_name, organizer_email, attendees,
+                conference_url, links
          FROM events WHERE calendar_id = ?1 AND id = ?2",
     )?;
     let mut rows = stmt.query(params![calendar_id, id])?;
@@ -144,9 +167,25 @@ pub fn detail(conn: &Connection, calendar_id: &str, id: &str) -> Result<Option<E
     Ok(Some(EventDetail {
         description: row.get(0)?,
         location: row.get(1)?,
+        conference_url: row.get(5)?,
+        links: parse_links(row.get::<_, Option<String>>(6)?.as_deref()),
         organizer: (!organizer.is_anonymous()).then_some(organizer),
         attendees: parse_attendees(row.get::<_, Option<String>>(4)?.as_deref()),
     }))
+}
+
+/// Tolerates unreadable stored JSON the same way attendees do.
+fn parse_links(json: Option<&str>) -> Vec<String> {
+    let Some(json) = json else {
+        return Vec::new();
+    };
+    match serde_json::from_str(json) {
+        Ok(links) => links,
+        Err(err) => {
+            tracing::warn!("ignoring unreadable stored links: {err}");
+            Vec::new()
+        }
+    }
 }
 
 /// Tolerates unreadable stored JSON rather than failing the whole panel; the
