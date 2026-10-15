@@ -10,6 +10,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
 
 /// The span of time a sync should cover.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,6 +34,64 @@ pub enum EventStatus {
     Tentative,
 }
 
+/// How an invitee replied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Response {
+    Accepted,
+    Declined,
+    Tentative,
+    /// Invited and yet to reply, which is also what a provider that doesn't
+    /// report replies at all maps to.
+    #[default]
+    NeedsAction,
+}
+
+/// Someone named on an event. Either field may be missing: a provider can give
+/// a bare address with no display name, and Google sends entries with neither
+/// for room and resource bookings.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Person {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+impl Person {
+    /// Whether this names nobody, in which case there is nothing to display.
+    pub fn is_anonymous(&self) -> bool {
+        self.name.is_none() && self.email.is_none()
+    }
+
+    /// The best label available: a display name, else the address.
+    pub fn label(&self) -> &str {
+        self.name
+            .as_deref()
+            .or(self.email.as_deref())
+            .unwrap_or("(unknown)")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Attendee {
+    #[serde(flatten)]
+    pub person: Person,
+    #[serde(default)]
+    pub response: Response,
+    /// Set on the signed-in user's own entry, so the UI can say "you".
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_self: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
+}
+
+/// Keeps the stored JSON to the fields that carry information; an attendee
+/// list can run to hundreds of entries.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// An event as the cache wants it, with every provider quirk already resolved.
 ///
 /// Providers must guarantee two things the storage layer relies on and cannot
@@ -50,6 +109,14 @@ pub struct ProviderEvent {
     pub status: EventStatus,
     /// Already resolved to `#rrggbb`; providers translate their own palettes.
     pub color: Option<String>,
+    /// Free text, already plain: providers strip whatever markup their service
+    /// stores (Google keeps HTML here for anything created in its web UI).
+    pub description: Option<String>,
+    pub location: Option<String>,
+    pub organizer: Option<Person>,
+    /// Empty when nobody was invited, which is every event in a holiday or
+    /// fixtures feed.
+    pub attendees: Vec<Attendee>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

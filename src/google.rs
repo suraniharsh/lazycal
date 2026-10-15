@@ -4,7 +4,9 @@ use std::pin::Pin;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Days, NaiveDate, Utc};
-use google_calendar3::api::{CalendarListEntry, Event, EventDateTime, EventListCall};
+use google_calendar3::api::{
+    CalendarListEntry, Event, EventAttendee, EventDateTime, EventListCall,
+};
 use google_calendar3::hyper_rustls::{self, HttpsConnector};
 use google_calendar3::hyper_util::client::legacy::Client;
 use google_calendar3::hyper_util::client::legacy::connect::HttpConnector;
@@ -14,8 +16,8 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use yup_oauth2::{InstalledFlowAuthenticator, InstalledFlowReturnMethod};
 
 use crate::provider::{
-    CalendarProvider, Change, EventStatus, EventTime, ProviderCalendar, ProviderEvent, SyncError,
-    SyncKind, SyncOutcome, Window,
+    Attendee, CalendarProvider, Change, EventStatus, EventTime, Person, ProviderCalendar,
+    ProviderEvent, Response, SyncError, SyncKind, SyncOutcome, Window,
 };
 
 /// Read-only access is enough: calendar visibility is a local preference and
@@ -289,7 +291,156 @@ fn to_change(event: &Event) -> Option<Change> {
             .as_deref()
             .and_then(event_color)
             .map(str::to_owned),
+        description: event
+            .description
+            .as_deref()
+            .map(plain_text)
+            .filter(|text| !text.is_empty()),
+        location: text(event.location.as_deref()),
+        organizer: event.organizer.as_ref().and_then(|organizer| {
+            let person = Person {
+                name: text(organizer.display_name.as_deref()),
+                email: text(organizer.email.as_deref()),
+            };
+            (!person.is_anonymous()).then_some(person)
+        }),
+        attendees: event
+            .attendees
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(to_attendee)
+            .collect(),
     })))
+}
+
+/// Trims an optional string and discards it if nothing is left, so a blank
+/// field from the API doesn't read as a present-but-empty one.
+fn text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+/// Maps one invitee, dropping entries that name nobody — Google emits those
+/// for room and equipment bookings.
+fn to_attendee(attendee: &EventAttendee) -> Option<Attendee> {
+    let person = Person {
+        name: text(attendee.display_name.as_deref()),
+        email: text(attendee.email.as_deref()),
+    };
+    if person.is_anonymous() {
+        return None;
+    }
+    Some(Attendee {
+        person,
+        response: match attendee.response_status.as_deref() {
+            Some("accepted") => Response::Accepted,
+            Some("declined") => Response::Declined,
+            Some("tentative") => Response::Tentative,
+            _ => Response::NeedsAction,
+        },
+        is_self: attendee.self_.unwrap_or(false),
+        optional: attendee.optional.unwrap_or(false),
+    })
+}
+
+/// Flattens a description into something a terminal can show.
+///
+/// Google stores HTML in `description` for anything created in its web UI, so
+/// the raw field arrives full of `<br>` and `&amp;`. Text that carries no
+/// recognisable tag is left exactly as it is, because a plain description may
+/// legitimately contain `<` and `>` and must not have them eaten.
+fn plain_text(description: &str) -> String {
+    if !looks_like_html(description) {
+        return description.trim().to_owned();
+    }
+
+    let mut out = String::with_capacity(description.len());
+    let mut rest = description;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open..];
+        let Some(close) = after.find('>') else {
+            // An unclosed `<` is content, not a tag.
+            out.push_str(after);
+            rest = "";
+            break;
+        };
+        if breaks_line(&after[1..close]) {
+            out.push('\n');
+        }
+        rest = &after[close + 1..];
+    }
+    out.push_str(rest);
+
+    collapse_blank_lines(&unescape(&out)).trim().to_owned()
+}
+
+/// Whether the text contains a tag we recognise, as opposed to stray angle
+/// brackets.
+fn looks_like_html(text: &str) -> bool {
+    const TAGS: [&str; 10] = [
+        "<br", "<p>", "<p ", "<div", "<span", "<a ", "<ul", "<ol", "<li", "</",
+    ];
+    let lower = text.to_ascii_lowercase();
+    TAGS.iter().any(|tag| lower.contains(tag))
+}
+
+/// Tags that end a line of text, so paragraphs don't run together.
+fn breaks_line(tag: &str) -> bool {
+    let name = tag
+        .trim_start_matches('/')
+        .split([' ', '/', '\t', '\n'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "br" | "p" | "div" | "li" | "tr" | "ul" | "ol" | "h1" | "h2" | "h3" | "blockquote"
+    )
+}
+
+fn unescape(text: &str) -> String {
+    // The entities Google actually emits. Ampersand is replaced last so
+    // "&amp;lt;" survives as the literal "&lt;".
+    const ENTITIES: [(&str, &str); 6] = [
+        ("&nbsp;", " "),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&apos;", "'"),
+    ];
+    let mut out = text.to_owned();
+    for (entity, literal) in ENTITIES {
+        if out.contains(entity) {
+            out = out.replace(entity, literal);
+        }
+    }
+    out.replace("&amp;", "&")
+}
+
+/// Markup generators are generous with `<div><br></div>`, which would
+/// otherwise leave a screen of empty rows in the detail panel.
+fn collapse_blank_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut blanks = 0;
+    for line in text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            blanks += 1;
+            if blanks > 1 {
+                continue;
+            }
+        } else {
+            blanks = 0;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Resolves start/end, synthesising an end Google didn't usably supply.
@@ -376,6 +527,8 @@ fn midnight_utc(date: NaiveDate) -> DateTime<Utc> {
 
 #[cfg(test)]
 mod tests {
+    use google_calendar3::api::EventOrganizer;
+
     use super::*;
 
     /// The shape Google actually returns for an expired sync token.
@@ -451,6 +604,21 @@ mod tests {
                 date: Some(date),
                 ..Default::default()
             }),
+            ..Default::default()
+        }
+    }
+
+    /// A confirmed, timed event with no detail fields set, for tests that care
+    /// about one field at a time.
+    fn event_fixture() -> Event {
+        Event {
+            id: Some("e1".to_owned()),
+            summary: Some("Standup".to_owned()),
+            start: Some(EventDateTime {
+                date: Some(date(2026, 10, 12)),
+                ..Default::default()
+            }),
+            location: Some("Room 4".to_owned()),
             ..Default::default()
         }
     }
@@ -607,5 +775,90 @@ mod tests {
                 .expect("utf-8"),
             id
         );
+    }
+
+    #[test]
+    fn a_plain_description_is_left_exactly_as_it_is() {
+        // Angle brackets in prose are content, not markup, and eating them
+        // would quietly corrupt the text.
+        assert_eq!(
+            plain_text("budget < 500 > last year"),
+            "budget < 500 > last year"
+        );
+        assert_eq!(plain_text("  padded  "), "padded");
+    }
+
+    #[test]
+    fn google_html_descriptions_become_readable_text() {
+        let html = "<div>Standup.<br>Agenda in the <a href=\"http://x\">doc</a>.</div>";
+        assert_eq!(plain_text(html), "Standup.\nAgenda in the doc.");
+    }
+
+    #[test]
+    fn entities_are_unescaped_once() {
+        assert_eq!(plain_text("<p>Tom &amp; Jerry</p>"), "Tom & Jerry");
+        assert_eq!(plain_text("<p>a&nbsp;b</p>"), "a b");
+        // The literal text "&lt;" was written as "&amp;lt;", and must survive
+        // as "&lt;" rather than unescaping twice into "<".
+        assert_eq!(plain_text("<p>&amp;lt;</p>"), "&lt;");
+    }
+
+    #[test]
+    fn runs_of_empty_markup_collapse() {
+        let html = "<div>One</div><div><br></div><div><br></div><div>Two</div>";
+        assert_eq!(plain_text(html), "One\n\nTwo");
+    }
+
+    #[test]
+    fn an_unclosed_angle_bracket_is_kept_as_content() {
+        assert_eq!(plain_text("<p>see <attachment"), "see <attachment");
+    }
+
+    #[test]
+    fn an_event_carries_its_detail_fields_across() {
+        let mut event = event_fixture();
+        event.description = Some("<p>Notes &amp; more</p>".to_owned());
+        event.location = Some("  Room 4  ".to_owned());
+        event.organizer = Some(EventOrganizer {
+            display_name: Some("Lead".to_owned()),
+            email: Some("lead@example.com".to_owned()),
+            ..Default::default()
+        });
+        event.attendees = Some(vec![
+            EventAttendee {
+                email: Some("lead@example.com".to_owned()),
+                response_status: Some("accepted".to_owned()),
+                self_: Some(true),
+                ..Default::default()
+            },
+            // A room booking, which names nobody and is dropped.
+            EventAttendee {
+                resource: Some(true),
+                ..Default::default()
+            },
+        ]);
+
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(mapped.description.as_deref(), Some("Notes & more"));
+        assert_eq!(mapped.location.as_deref(), Some("Room 4"));
+        assert_eq!(
+            mapped.organizer.as_ref().map(|person| person.label()),
+            Some("Lead")
+        );
+        assert_eq!(mapped.attendees.len(), 1, "the resource row is dropped");
+        assert_eq!(mapped.attendees[0].response, Response::Accepted);
+        assert!(mapped.attendees[0].is_self);
+    }
+
+    #[test]
+    fn an_unanswered_invitation_defaults_to_needing_action() {
+        let mut event = event_fixture();
+        event.attendees = Some(vec![EventAttendee {
+            email: Some("someone@example.com".to_owned()),
+            response_status: None,
+            ..Default::default()
+        }]);
+        let mapped = upserted(to_change(&event).expect("a change"));
+        assert_eq!(mapped.attendees[0].response, Response::NeedsAction);
     }
 }

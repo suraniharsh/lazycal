@@ -78,6 +78,59 @@ pub fn pad_to_width(s: &str, width: usize) -> String {
     }
 }
 
+/// Breaks `text` into lines that each fit `width` display columns.
+///
+/// Existing newlines are kept, so a pasted description keeps its paragraphs,
+/// and a word too long to fit any line is split across several rather than
+/// overflowing the panel it is drawn in.
+pub fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        for word in sanitize(paragraph).split_whitespace() {
+            for piece in split_to_width(word, width) {
+                // The + 1 is the space this piece would need after the
+                // current line; a fresh line doesn't need one.
+                if !line.is_empty() && display_width(&line) + 1 + display_width(&piece) > width {
+                    lines.push(std::mem::take(&mut line));
+                }
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&piece);
+            }
+        }
+        // Pushed even when empty, which is what keeps a blank line blank.
+        lines.push(line);
+    }
+    lines
+}
+
+/// Splits a single word into pieces of at most `width` columns.
+fn split_to_width(word: &str, width: usize) -> Vec<String> {
+    if display_width(word) <= width {
+        return vec![word.to_owned()];
+    }
+    let mut pieces = Vec::new();
+    let mut piece = String::new();
+    for character in word.chars() {
+        let mut buffer = [0u8; 4];
+        let encoded = character.encode_utf8(&mut buffer);
+        if !piece.is_empty() && display_width(&piece) + display_width(encoded) > width {
+            pieces.push(std::mem::take(&mut piece));
+        }
+        piece.push(character);
+    }
+    if !piece.is_empty() {
+        pieces.push(piece);
+    }
+    pieces
+}
+
 /// Replaces control characters with spaces, keeping the column count intact.
 fn sanitize(s: &str) -> String {
     if s.chars().any(char::is_control) {
@@ -182,5 +235,50 @@ mod tests {
         assert_eq!(pad_to_width("abcde", 5), "abcde");
         assert_eq!(pad_to_width("abcdefg", 5), "abcdefg", "never truncates");
         assert_eq!(pad_to_width("", 3), "   ");
+    }
+
+    #[test]
+    fn wrapping_breaks_on_spaces() {
+        assert_eq!(
+            wrap_to_width("the quick brown fox", 10),
+            ["the quick", "brown fox"]
+        );
+    }
+
+    #[test]
+    fn wrapping_keeps_paragraphs() {
+        assert_eq!(wrap_to_width("one\n\ntwo", 10), ["one", "", "two"]);
+    }
+
+    #[test]
+    fn a_word_too_long_for_a_line_is_split_rather_than_overflowing() {
+        // A meeting URL is one unbreakable word and must not run off the panel.
+        let lines = wrap_to_width("https://meet.example.com/abc-defg-hij", 12);
+        assert!(
+            lines.iter().all(|line| display_width(line) <= 12),
+            "{lines:?}"
+        );
+        assert_eq!(lines.concat(), "https://meet.example.com/abc-defg-hij");
+    }
+
+    #[test]
+    fn wrapping_measures_in_columns_not_characters() {
+        // The emoji occupies two columns, so only one more fits beside it.
+        let lines = wrap_to_width("\u{23f1}\u{fe0f} ab", 4);
+        assert!(
+            lines.iter().all(|line| display_width(line) <= 4),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn wrapping_into_no_width_gives_nothing_rather_than_looping() {
+        assert!(wrap_to_width("anything", 0).is_empty());
+    }
+
+    #[test]
+    fn wrapping_replaces_control_characters() {
+        let lines = wrap_to_width("a\u{7}b", 10);
+        assert_eq!(lines, ["a b"]);
     }
 }

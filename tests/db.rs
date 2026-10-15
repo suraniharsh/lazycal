@@ -3,7 +3,9 @@
 use chrono::{NaiveDate, TimeZone, Utc};
 use lazycal::db::calendars::SyncState;
 use lazycal::db::{self, calendars, events, schema};
-use lazycal::provider::{Change, EventStatus, EventTime, ProviderEvent};
+use lazycal::provider::{
+    Attendee, Change, EventStatus, EventTime, Person, ProviderEvent, Response,
+};
 use rusqlite::Connection;
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -39,6 +41,10 @@ fn all_day_event(id: &str, summary: &str, start: NaiveDate, end: NaiveDate) -> C
         end: EventTime::Date(end),
         status: EventStatus::Confirmed,
         color: None,
+        description: None,
+        location: None,
+        organizer: None,
+        attendees: Vec::new(),
     })
 }
 
@@ -51,6 +57,10 @@ fn timed_event(id: &str, summary: &str, start: NaiveDate, hour: u32) -> Change {
         end: EventTime::Instant(at(hour + 1)),
         status: EventStatus::Confirmed,
         color: None,
+        description: None,
+        location: None,
+        organizer: None,
+        attendees: Vec::new(),
     })
 }
 
@@ -61,7 +71,19 @@ fn open_creates_and_migrates_a_database_file() {
 
     let conn = db::open(&path).expect("open");
     assert!(columns(&conn, "calendars").contains(&"selected".to_owned()));
-    assert!(columns(&conn, "events").contains(&"color_id".to_owned()));
+    let event_columns = columns(&conn, "events");
+    for added in [
+        "color_id",
+        "description",
+        "location",
+        "organizer_email",
+        "attendees",
+    ] {
+        assert!(
+            event_columns.contains(&added.to_owned()),
+            "{added} is missing"
+        );
+    }
     drop(conn);
 
     // Opening an existing database again must succeed unchanged.
@@ -99,26 +121,50 @@ fn migration_adds_columns_to_a_legacy_database() {
              status TEXT NOT NULL,
              PRIMARY KEY (calendar_id, id)
          );
-         INSERT INTO calendars (id, summary) VALUES ('cal-1', 'Legacy');",
+         INSERT INTO calendars (id, summary, sync_token)
+             VALUES ('cal-1', 'Legacy', 'resume-from-here');",
     )
     .expect("create legacy schema");
 
     schema::init(&conn).expect("migrate");
 
     assert!(columns(&conn, "calendars").contains(&"selected".to_owned()));
-    assert!(columns(&conn, "events").contains(&"color_id".to_owned()));
+    let event_columns = columns(&conn, "events");
+    for added in [
+        "color_id",
+        "description",
+        "location",
+        "organizer_email",
+        "attendees",
+    ] {
+        assert!(
+            event_columns.contains(&added.to_owned()),
+            "{added} is missing"
+        );
+    }
 
     // Pre-existing rows pick up the column default rather than NULL.
     let cal = calendars::list_calendars(&conn).expect("list");
     assert_eq!(cal.len(), 1);
     assert!(cal[0].selected, "existing calendars default to visible");
+
+    // The new columns are empty for every event already cached, and an
+    // incremental sync only reports what changed — so they would stay empty
+    // forever unless the next sync is made a full one.
+    assert_eq!(
+        calendars::sync_state(&conn, "cal-1").expect("state").token,
+        None,
+        "the cursor has to go, or the added columns never get filled"
+    );
 }
 
 #[test]
 fn add_column_if_missing_is_a_no_op_when_present() {
     let conn = memory_db();
-    schema::add_column_if_missing(&conn, "calendars", "selected", "INTEGER NOT NULL DEFAULT 1")
-        .expect("no-op add");
+    let added =
+        schema::add_column_if_missing(&conn, "calendars", "selected", "INTEGER NOT NULL DEFAULT 1")
+            .expect("no-op add");
+    assert!(!added, "the column was already there");
     let selected_columns = columns(&conn, "calendars")
         .iter()
         .filter(|c| *c == "selected")
@@ -306,6 +352,10 @@ fn apply_records_a_resolved_event_color() {
             end: EventTime::Date(date(2026, 8, 27)),
             status: EventStatus::Confirmed,
             color: None,
+            description: None,
+            location: None,
+            organizer: None,
+            attendees: Vec::new(),
         }
     });
 
@@ -379,4 +429,164 @@ fn events_between_finds_timed_events_by_instant() {
     let elsewhere =
         events::events_between(&conn, date(2026, 9, 10), date(2026, 9, 20)).expect("query");
     assert!(elsewhere.is_empty());
+}
+
+#[test]
+fn detail_fields_survive_a_round_trip() {
+    let conn = memory_db();
+    let event = upsert(ProviderEvent {
+        description: Some("Agenda in the doc.".to_owned()),
+        location: Some("Meeting room 2".to_owned()),
+        organizer: Some(Person {
+            name: Some("Lead".to_owned()),
+            email: Some("lead@example.com".to_owned()),
+        }),
+        attendees: vec![
+            Attendee {
+                person: Person {
+                    name: None,
+                    email: Some("lead@example.com".to_owned()),
+                },
+                response: Response::Accepted,
+                is_self: true,
+                optional: false,
+            },
+            Attendee {
+                person: Person {
+                    name: Some("Other".to_owned()),
+                    email: None,
+                },
+                response: Response::Declined,
+                is_self: false,
+                optional: true,
+            },
+        ],
+        ..plain_event()
+    });
+    events::apply(&conn, "cal-1", &event).expect("apply");
+
+    let detail = events::detail(&conn, "cal-1", "e1")
+        .expect("read detail")
+        .expect("the event is cached");
+    assert_eq!(detail.description.as_deref(), Some("Agenda in the doc."));
+    assert_eq!(detail.location.as_deref(), Some("Meeting room 2"));
+    assert_eq!(
+        detail.organizer.as_ref().map(|person| person.label()),
+        Some("Lead")
+    );
+    assert_eq!(detail.attendees.len(), 2);
+    assert!(detail.attendees[0].is_self);
+    assert_eq!(detail.attendees[0].response, Response::Accepted);
+    assert_eq!(detail.attendees[1].person.name.as_deref(), Some("Other"));
+    assert!(detail.attendees[1].optional);
+}
+
+#[test]
+fn an_event_with_no_details_reads_back_empty() {
+    let conn = memory_db();
+    events::apply(&conn, "cal-1", &upsert(plain_event())).expect("apply");
+
+    let detail = events::detail(&conn, "cal-1", "e1")
+        .expect("read detail")
+        .expect("the event is cached");
+    assert_eq!(detail, Default::default());
+}
+
+#[test]
+fn detail_reports_an_event_that_is_no_longer_cached() {
+    // The panel can be open when a sync removes the event underneath it.
+    let conn = memory_db();
+    assert_eq!(events::detail(&conn, "cal-1", "gone").expect("query"), None);
+}
+
+#[test]
+fn an_upsert_replaces_the_previous_details() {
+    let conn = memory_db();
+    events::apply(
+        &conn,
+        "cal-1",
+        &upsert(ProviderEvent {
+            location: Some("Room 4".to_owned()),
+            ..plain_event()
+        }),
+    )
+    .expect("apply");
+    // The meeting moved online, so the room has to go rather than linger.
+    events::apply(&conn, "cal-1", &upsert(plain_event())).expect("apply");
+
+    let detail = events::detail(&conn, "cal-1", "e1")
+        .expect("read detail")
+        .expect("still cached");
+    assert_eq!(detail.location, None);
+}
+
+/// An event with no detail fields set, for tests that set one at a time.
+fn plain_event() -> ProviderEvent {
+    ProviderEvent {
+        id: "e1".to_owned(),
+        summary: "Standup".to_owned(),
+        start: EventTime::Date(date(2026, 10, 12)),
+        end: EventTime::Date(date(2026, 10, 13)),
+        status: EventStatus::Confirmed,
+        color: None,
+        description: None,
+        location: None,
+        organizer: None,
+        attendees: Vec::new(),
+    }
+}
+
+#[test]
+fn adding_the_detail_columns_forces_the_next_sync_to_be_a_full_one() {
+    // An incremental sync only reports events that changed, so a database
+    // written before these columns existed would never have them filled in.
+    let conn = Connection::open_in_memory().expect("open in-memory db");
+    conn.execute_batch(
+        "CREATE TABLE calendars (
+             id TEXT PRIMARY KEY, summary TEXT NOT NULL, color TEXT,
+             is_primary INTEGER NOT NULL DEFAULT 0, sync_token TEXT
+         );",
+    )
+    .expect("create a pre-upgrade calendars table");
+    conn.execute(
+        "INSERT INTO calendars (id, summary, sync_token) VALUES ('cal-1', 'Work', 'token-1')",
+        [],
+    )
+    .expect("insert");
+
+    schema::init(&conn).expect("migrate");
+
+    let token: Option<String> = conn
+        .query_row(
+            "SELECT sync_token FROM calendars WHERE id = 'cal-1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read token");
+    assert_eq!(
+        token, None,
+        "the cursor was dropped so the next sync refills"
+    );
+}
+
+#[test]
+fn a_second_init_leaves_the_sync_token_alone() {
+    // Only the upgrade clears it; every later start must not throw away a
+    // perfectly good cursor and resync everything.
+    let conn = memory_db();
+    calendars::upsert_calendar(&conn, "cal-1", "Work", None, true).expect("insert");
+    calendars::set_sync_state(
+        &conn,
+        "cal-1",
+        &SyncState {
+            token: Some("token-1".to_owned()),
+            horizon: None,
+        },
+    )
+    .expect("store token");
+
+    schema::init(&conn).expect("re-init");
+
+    let state = calendars::sync_state(&conn, "cal-1").expect("read state");
+    assert_eq!(state.token.as_deref(), Some("token-1"));
 }

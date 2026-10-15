@@ -63,29 +63,65 @@ pub fn event_line(event: &EventView, width: usize, base: Style) -> Line<'static>
     }
 }
 
+/// Marks a line as the one the event cursor is on.
+///
+/// Reversing rather than recolouring keeps the calendar's own colour on screen,
+/// so a highlighted event can still be told apart from one on another calendar.
+pub fn highlight(line: Line<'static>) -> Line<'static> {
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .into_iter()
+        .map(|span| {
+            let style = span.style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            Span::styled(span.content, style)
+        })
+        .collect();
+    Line::from(spans)
+}
+
 /// Lays events out into at most `capacity` lines, spending the last line on a
 /// count of what didn't fit rather than dropping it silently.
+///
+/// `cursor` is the index of the event the cursor is on, which is kept on screen
+/// even in a cell too short for it: `Enter` acts on that event, so it must be
+/// visible rather than hidden behind the overflow count.
 pub fn event_lines(
     events: &[EventView],
     width: usize,
     capacity: usize,
     base: Style,
+    cursor: Option<usize>,
 ) -> Vec<Line<'static>> {
     if capacity == 0 {
         return Vec::new();
     }
+
+    let decorate = |(index, event): (usize, &EventView)| {
+        let line = event_line(event, width, base);
+        if cursor == Some(index) {
+            highlight(line)
+        } else {
+            line
+        }
+    };
+
     if events.len() <= capacity {
-        return events
-            .iter()
-            .map(|event| event_line(event, width, base))
-            .collect();
+        return events.iter().enumerate().map(decorate).collect();
     }
 
+    // One line goes to the count, and the window of events shown slides just
+    // far enough to include the cursor.
     let shown = capacity - 1;
+    let first = match cursor {
+        Some(index) if index >= shown => index + 1 - shown,
+        _ => 0,
+    };
     let mut lines: Vec<Line<'static>> = events
         .iter()
+        .enumerate()
+        .skip(first)
         .take(shown)
-        .map(|event| event_line(event, width, base))
+        .map(decorate)
         .collect();
     lines.push(overflow_line(events.len() - shown, width));
     lines
@@ -104,11 +140,14 @@ mod tests {
 
     fn event(summary: &str, all_day: bool) -> EventView {
         EventView {
+            calendar_id: "cal-1".to_owned(),
+            id: summary.to_owned(),
             summary: summary.to_owned(),
             color: Color::Rgb(11, 128, 67),
             all_day,
             start_utc: if all_day { None } else { Some(0) },
             end_utc: if all_day { None } else { Some(3600) },
+            dates: None,
             continuation: false,
         }
     }
@@ -176,8 +215,8 @@ mod tests {
     #[test]
     fn events_that_fit_are_all_rendered() {
         let events = [event("a", false), event("b", false)];
-        assert_eq!(event_lines(&events, 20, 3, Style::default()).len(), 2);
-        assert_eq!(event_lines(&events, 20, 2, Style::default()).len(), 2);
+        assert_eq!(event_lines(&events, 20, 3, Style::default(), None).len(), 2);
+        assert_eq!(event_lines(&events, 20, 2, Style::default(), None).len(), 2);
     }
 
     #[test]
@@ -185,7 +224,7 @@ mod tests {
         let events: Vec<_> = (0..5)
             .map(|i| event(&format!("event {i}"), false))
             .collect();
-        let lines = event_lines(&events, 20, 3, Style::default());
+        let lines = event_lines(&events, 20, 3, Style::default(), None);
 
         assert_eq!(lines.len(), 3);
         assert_eq!(text_of(&lines[0]), "● event 0");
@@ -202,7 +241,7 @@ mod tests {
         let events: Vec<_> = (0..4)
             .map(|i| event(&format!("event {i}"), false))
             .collect();
-        let lines = event_lines(&events, 20, 1, Style::default());
+        let lines = event_lines(&events, 20, 1, Style::default(), None);
         assert_eq!(lines.len(), 1);
         assert_eq!(text_of(&lines[0]), "+4 more");
     }
@@ -210,6 +249,6 @@ mod tests {
     #[test]
     fn no_capacity_renders_nothing() {
         let events = [event("a", false)];
-        assert!(event_lines(&events, 20, 0, Style::default()).is_empty());
+        assert!(event_lines(&events, 20, 0, Style::default(), None).is_empty());
     }
 }

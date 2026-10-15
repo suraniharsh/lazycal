@@ -10,6 +10,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::clock::Clock;
 use crate::data::EventView;
 use crate::text::{pad_to_width, truncate_to_width};
 use crate::theme;
@@ -58,11 +59,11 @@ fn slot_of(timestamp: i64) -> Option<u32> {
     Some((local.hour() * 60 + local.minute()) / SLOT_MINUTES)
 }
 
-fn local_hhmm(timestamp: i64) -> Option<String> {
+fn local_time(timestamp: i64, clock: Clock) -> Option<String> {
     Local
         .timestamp_opt(timestamp, 0)
         .single()
-        .map(|at| at.format("%H:%M").to_string())
+        .map(|at| clock.format(at.time()))
 }
 
 /// Places timed events into rows and overlap lanes.
@@ -135,25 +136,42 @@ pub fn lay_out(events: &[EventView], window: SlotWindow) -> Vec<Block> {
         .collect()
 }
 
-/// Chooses the window to open on: the day's first event, the current time
-/// when looking at today, or mid-morning for an empty day.
-pub fn initial_scroll(events: &[EventView], date: NaiveDate, rows: u16) -> u32 {
-    let earliest = events
-        .iter()
+/// Chooses the window to open on.
+///
+/// The event under the cursor wins, because tabbing to one that then isn't on
+/// screen leaves nothing to show what `Enter` would open. Failing that it is
+/// the day's first event, the current time when looking at today, or
+/// mid-morning for an empty day.
+pub fn initial_scroll(
+    events: &[EventView],
+    cursor: Option<usize>,
+    date: NaiveDate,
+    rows: u16,
+) -> u32 {
+    let at_cursor = cursor
+        .and_then(|index| events.get(index))
         .filter(|event| !event.all_day)
-        .filter_map(|event| event.start_utc.and_then(slot_of))
-        .min();
+        .and_then(|event| event.start_utc)
+        .and_then(slot_of);
 
-    let target = earliest.unwrap_or_else(|| {
-        if date == Local::now().date_naive() {
-            let now = Local::now();
-            (now.hour() * 60 + now.minute()) / SLOT_MINUTES
-        } else {
-            DEFAULT_FIRST_SLOT
-        }
-    });
+    let target = at_cursor
+        .or_else(|| {
+            events
+                .iter()
+                .filter(|event| !event.all_day)
+                .filter_map(|event| event.start_utc.and_then(slot_of))
+                .min()
+        })
+        .unwrap_or_else(|| {
+            if date == Local::now().date_naive() {
+                let now = Local::now();
+                (now.hour() * 60 + now.minute()) / SLOT_MINUTES
+            } else {
+                DEFAULT_FIRST_SLOT
+            }
+        });
 
-    // A slot of air above, so the first event isn't flush against the border.
+    // A slot of air above, so the event isn't flush against the border.
     clamp_scroll(target.saturating_sub(1), rows)
 }
 
@@ -163,15 +181,17 @@ pub fn clamp_scroll(first: u32, rows: u16) -> u32 {
 }
 
 /// Draws the time gutter, labelling whole hours only.
-pub fn draw_gutter(frame: &mut Frame, area: Rect, window: SlotWindow) {
+pub fn draw_gutter(frame: &mut Frame, area: Rect, window: SlotWindow, clock: Clock) {
     let slots_per_hour = 60 / SLOT_MINUTES;
     let lines: Vec<Line> = (0..area.height)
         .map(|row| {
             let slot = window.first + u32::from(row);
             if slot.is_multiple_of(slots_per_hour) {
-                let minutes = slot * SLOT_MINUTES;
+                // Right-aligned so both forms end in the same column: `09:00`
+                // is five wide and `9am` is three.
+                let label = clock.format_hour(slot * SLOT_MINUTES / 60);
                 Line::from(Span::styled(
-                    format!("{:02}:{:02} ", minutes / 60, minutes % 60),
+                    format!("{label:>width$} ", width = GUTTER_WIDTH as usize - 1),
                     Style::default().fg(theme::MUTED),
                 ))
             } else {
@@ -182,13 +202,16 @@ pub fn draw_gutter(frame: &mut Frame, area: Rect, window: SlotWindow) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Draws one day's worth of blocks.
+/// Draws one day's worth of blocks. `cursor` is the index of the event the
+/// cursor is on, if it is on one in this column.
 pub fn draw_day_column(
     frame: &mut Frame,
     area: Rect,
     events: &[EventView],
     window: SlotWindow,
     show_now: bool,
+    cursor: Option<usize>,
+    clock: Clock,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -200,11 +223,17 @@ pub fn draw_day_column(
     // A week column can't show lanes side by side without shredding both, so
     // it keeps the first and counts the rest.
     let collapse = lanes > 1 && lane_width < MIN_LANE_WIDTH;
+    let is_cursor = |block: &Block| cursor == Some(block.event);
 
-    for block in &blocks {
-        if collapse && block.lane > 0 {
-            continue;
-        }
+    // A collapsed column hides the later lanes, but never the cursor: it is
+    // what `Enter` opens, so it is drawn last and wins the overlap.
+    let mut order: Vec<&Block> = blocks
+        .iter()
+        .filter(|block| !collapse || block.lane == 0 || is_cursor(block))
+        .collect();
+    order.sort_by_key(|block| is_cursor(block));
+
+    for block in order {
         let (x, width) = if collapse {
             // Leave the marker strip clear so "+2" can't land on the title.
             (area.x, area.width.saturating_sub(MARKER_WIDTH))
@@ -224,6 +253,8 @@ pub fn draw_day_column(
                 height,
             },
             &events[block.event],
+            is_cursor(block),
+            clock,
         );
     }
 
@@ -235,10 +266,14 @@ pub fn draw_day_column(
     }
 }
 
-fn draw_block(frame: &mut Frame, area: Rect, event: &EventView) {
-    let style = Style::default()
+fn draw_block(frame: &mut Frame, area: Rect, event: &EventView, selected: bool, clock: Clock) {
+    let mut style = Style::default()
         .fg(theme::contrasting_fg(event.color))
         .bg(event.color);
+    if selected {
+        // Reversed rather than recoloured, so the calendar's colour survives.
+        style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    }
     let width = area.width as usize;
 
     let label = if event.continuation {
@@ -257,8 +292,8 @@ fn draw_block(frame: &mut Frame, area: Rect, event: &EventView) {
     // The time range earns its row only once the title already has one.
     if area.height >= 2 {
         let range = match (
-            event.start_utc.and_then(local_hhmm),
-            event.end_utc.and_then(local_hhmm),
+            event.start_utc.and_then(|at| local_time(at, clock)),
+            event.end_utc.and_then(|at| local_time(at, clock)),
         ) {
             (Some(from), Some(to)) => format!("{from}\u{2013}{to}"),
             (Some(from), None) => from,
@@ -347,22 +382,28 @@ mod tests {
             .expect("representable local time")
             .timestamp();
         EventView {
+            calendar_id: "cal-1".into(),
+            id: format!("{hour:02}:{minute:02}"),
             summary: format!("{hour:02}:{minute:02}"),
             color: Color::Blue,
             all_day: false,
             start_utc: Some(start),
             end_utc: Some(start + minutes * 60),
+            dates: None,
             continuation: false,
         }
     }
 
     fn all_day() -> EventView {
         EventView {
+            calendar_id: "cal-1".into(),
+            id: "holiday".into(),
             summary: "Holiday".into(),
             color: Color::Green,
             all_day: true,
             start_utc: None,
             end_utc: None,
+            dates: None,
             continuation: false,
         }
     }
@@ -471,15 +512,53 @@ mod tests {
 
     #[test]
     fn opens_on_the_first_event_of_the_day() {
-        let scroll = initial_scroll(&[at(14, 0, 60)], NaiveDate::MIN, 10);
+        let scroll = initial_scroll(&[at(14, 0, 60)], None, NaiveDate::MIN, 10);
         assert_eq!(scroll, 27, "one slot of air above 14:00");
     }
 
     #[test]
     fn an_empty_past_day_opens_mid_morning() {
         assert_eq!(
-            initial_scroll(&[], NaiveDate::MIN, 10),
+            initial_scroll(&[], None, NaiveDate::MIN, 10),
             DEFAULT_FIRST_SLOT - 1
+        );
+    }
+
+    #[test]
+    fn opens_on_the_cursors_event_rather_than_the_days_first() {
+        // Tabbing to an event the window doesn't cover would leave nothing to
+        // show what `Enter` is about to open.
+        let events = [at(9, 0, 60), at(18, 0, 60)];
+        let scroll = initial_scroll(&events, Some(1), NaiveDate::MIN, 10);
+        assert_eq!(scroll, 35, "one slot of air above 18:00");
+
+        let window = SlotWindow {
+            first: scroll,
+            rows: 10,
+        };
+        let blocks = lay_out(&events, window);
+        assert!(
+            blocks.iter().any(|block| block.event == 1),
+            "the cursor's event is inside the window it chose"
+        );
+    }
+
+    #[test]
+    fn an_all_day_cursor_leaves_the_grid_where_it_was() {
+        // All-day events live in the band above, not in the grid.
+        let events = [all_day(), at(14, 0, 60)];
+        assert_eq!(
+            initial_scroll(&events, Some(0), NaiveDate::MIN, 10),
+            initial_scroll(&events, None, NaiveDate::MIN, 10)
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_cursor_is_ignored() {
+        let events = [at(14, 0, 60)];
+        assert_eq!(
+            initial_scroll(&events, Some(99), NaiveDate::MIN, 10),
+            initial_scroll(&events, None, NaiveDate::MIN, 10)
         );
     }
 }

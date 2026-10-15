@@ -7,24 +7,13 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::app::App;
+use crate::app::{App, MONTH_WEEKS};
 use crate::data::EventView;
 use crate::theme;
 use crate::ui::render::{WEEKDAYS_SHORT, day_number_style, event_lines};
 
-/// Always six week rows, so the grid height doesn't jump between months.
-const ROWS: usize = 6;
+const ROWS: usize = MONTH_WEEKS as usize;
 const COLUMNS: u32 = 7;
-
-/// The full grid this view will show, so the caller can fetch exactly the
-/// events that will be rendered.
-pub fn visible_range(app: &App) -> (NaiveDate, NaiveDate) {
-    let start = grid_start(app.month_anchor());
-    let end = start
-        .checked_add_days(Days::new((ROWS * 7) as u64))
-        .unwrap_or(NaiveDate::MAX);
-    (start, end)
-}
 
 pub fn draw(
     frame: &mut Frame,
@@ -46,7 +35,7 @@ pub fn draw(
     }
 
     let anchor = app.month_anchor();
-    let start = grid_start(anchor);
+    let (start, _) = app.visible_range();
     let today = chrono::Local::now().date_naive();
     let rows = Layout::vertical([Constraint::Ratio(1, ROWS as u32); ROWS]).split(grid);
 
@@ -59,14 +48,6 @@ pub fn draw(
             draw_day(frame, *cell, date, anchor, app, today, events.get(&date));
         }
     }
-}
-
-/// The Sunday on or before the first of the month.
-fn grid_start(anchor: NaiveDate) -> NaiveDate {
-    let weekday = u64::from(anchor.weekday().num_days_from_sunday());
-    anchor
-        .checked_sub_days(Days::new(weekday))
-        .unwrap_or(anchor)
 }
 
 fn draw_day(
@@ -92,7 +73,13 @@ fn draw_day(
     if let Some(events) = events {
         // One line of the cell is spent on the date itself.
         let capacity = (area.height as usize).saturating_sub(1);
-        lines.extend(event_lines(events, width, capacity, base));
+        lines.extend(event_lines(
+            events,
+            width,
+            capacity,
+            base,
+            app.cursor_index_on(date),
+        ));
     }
 
     frame.render_widget(Paragraph::new(lines).style(base), area);

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{Days, NaiveDate};
+use chrono::NaiveDate;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -10,24 +10,15 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::data::EventView;
 use crate::theme;
-use crate::ui::render::{event_line, overflow_line};
+use crate::ui::render::{event_line, highlight, overflow_line};
 
-const DAYS_SHOWN: u64 = 30;
 /// Events are indented under their date header.
 const INDENT: &str = "  ";
-
-pub fn visible_range(app: &App) -> (NaiveDate, NaiveDate) {
-    let end = app
-        .selected
-        .checked_add_days(Days::new(DAYS_SHOWN))
-        .unwrap_or(NaiveDate::MAX);
-    (app.selected, end)
-}
 
 pub fn draw(
     frame: &mut Frame,
     area: Rect,
-    _app: &App,
+    app: &App,
     events: &BTreeMap<NaiveDate, Vec<EventView>>,
 ) {
     let base = Style::default().fg(theme::TEXT);
@@ -50,12 +41,17 @@ pub fn draw(
             Style::default().fg(theme::ACCENT),
         )));
 
-        for event in day_events {
+        for (index, event) in day_events.iter().enumerate() {
             if lines.len() + 1 >= capacity {
                 skipped += 1;
                 continue;
             }
-            lines.push(indent(event_line(event, width, base)));
+            let line = event_line(event, width, base);
+            lines.push(indent(if app.is_cursor(*date, index) {
+                highlight(line)
+            } else {
+                line
+            }));
         }
     }
 

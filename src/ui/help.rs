@@ -23,31 +23,44 @@ const ENTRIES: &[Entry] = &[
     Key("m  w  d  a", "month, week, day, agenda"),
     Section("Moving around"),
     Key("h  l   \u{2190} \u{2192}", "previous / next day"),
-    Key("j  k   \u{2193} \u{2191}", "next / previous week"),
-    Key("", "scrolls the hours in week and day"),
+    Key(
+        "j  k   \u{2193} \u{2191}",
+        "next / previous week, or the hours in week and day",
+    ),
     Key("PgUp  PgDn", "previous / next month"),
-    Key("t", "jump to today"),
+    Key("t", "jump to today, and track what's next again"),
+    Section("Events"),
+    Key("", "the meeting on now, or next today, is marked"),
+    Key("tab  shift-tab", "next / previous event"),
+    Key("enter", "show where, who and notes"),
+    // The panel's own bottom border says how to close it, so this list
+    // doesn't spend one of its scarce rows repeating that.
+    Key("j  k", "scroll a long description"),
     Section("Calendars"),
-    Key("c", "focus the calendar list"),
+    Key("c  esc", "focus the calendar list, and leave it again"),
     Key("j  k", "move through the list"),
     Key("space  enter", "show or hide that calendar"),
-    Key("esc  c", "back to the calendar"),
     Section("Other"),
     Key("r", "sync now"),
     Key("?", "this help"),
     Key("q  Ctrl-C", "quit"),
 ];
 
-/// Columns given to the key column before the description starts.
-const KEY_WIDTH: usize = 14;
+/// Columns given to the key column before the description starts. Every entry
+/// must be narrower than this, or its keys run into its description — which a
+/// test below enforces.
+const KEY_WIDTH: usize = 16;
 const PADDING: u16 = 4;
 
-fn lines() -> Vec<Line<'static>> {
+/// Builds the rows. `compact` drops the blank line between sections, which is
+/// what lets the whole list fit a terminal only 24 rows tall — losing the last
+/// few entries off the bottom would take "how to quit" with them.
+fn lines(compact: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::with_capacity(ENTRIES.len() + 2);
     for entry in ENTRIES {
         match entry {
             Section(title) => {
-                if !lines.is_empty() {
+                if !lines.is_empty() && !compact {
                     lines.push(Line::from(""));
                 }
                 lines.push(Line::from(Span::styled(
@@ -92,8 +105,14 @@ pub fn draw(frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let lines = lines();
-    let (width, height) = preferred_size(&lines);
+    let roomy = lines(false);
+    // Only fall back to the tighter layout when the roomy one wouldn't fit.
+    let rows = if preferred_size(&roomy).1 > area.height {
+        lines(true)
+    } else {
+        roomy
+    };
+    let (width, height) = preferred_size(&rows);
     let popup = centered(area, width, height);
 
     let block = Block::bordered()
@@ -108,7 +127,7 @@ pub fn draw(frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(theme::TEXT)),
+        Paragraph::new(rows).style(Style::default().fg(theme::TEXT)),
         inner,
     );
 }
@@ -131,11 +150,56 @@ mod tests {
         // Every key `app.rs` acts on should be findable here. If a binding is
         // added without a help entry, this fails.
         for key in [
-            "m", "w", "d", "a", "h", "l", "j", "k", "t", "c", "r", "?", "q", "esc", "space",
-            "enter", "PgUp", "PgDn", "Ctrl-C",
+            "m",
+            "w",
+            "d",
+            "a",
+            "h",
+            "l",
+            "j",
+            "k",
+            "t",
+            "c",
+            "r",
+            "?",
+            "q",
+            "esc",
+            "space",
+            "enter",
+            "tab",
+            "shift-tab",
+            "PgUp",
+            "PgDn",
+            "Ctrl-C",
         ] {
             assert!(documented.contains(key), "key {key:?} is not in the help");
         }
+    }
+
+    #[test]
+    fn no_entrys_keys_run_into_its_description() {
+        for entry in ENTRIES {
+            if let Key(keys, description) = entry {
+                assert!(
+                    crate::text::display_width(keys) < KEY_WIDTH,
+                    "{keys:?} fills the key column, so {description:?} starts flush against it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_whole_list_fits_a_standard_terminal() {
+        // 80x24 is the floor worth supporting, and the last entry in the list
+        // is how to quit, so nothing may fall off the bottom.
+        let roomy = lines(false);
+        let compact = lines(true);
+        assert!(compact.len() < roomy.len(), "compact drops the blank rows");
+        assert!(
+            preferred_size(&compact).1 <= 24,
+            "{} rows is taller than a short terminal",
+            preferred_size(&compact).1
+        );
     }
 
     #[test]

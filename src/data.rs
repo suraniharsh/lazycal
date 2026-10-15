@@ -8,6 +8,10 @@ use crate::theme;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventView {
+    /// Which calendar this came from, used to look up its name and to fetch
+    /// the event's detail fields on demand.
+    pub calendar_id: String,
+    pub id: String,
     pub summary: String,
     pub color: Color,
     pub all_day: bool,
@@ -17,6 +21,10 @@ pub struct EventView {
     /// End instant for timed events, which is what gives a block its height.
     /// `None` for all-day events.
     pub end_utc: Option<i64>,
+    /// Inclusive first and last local dates an all-day event covers, so the
+    /// detail panel can report the whole span rather than just the day being
+    /// looked at. `None` for timed events, which carry instants instead.
+    pub dates: Option<(NaiveDate, NaiveDate)>,
     /// True on the days of a multi-day event other than its first, so the
     /// renderer can mark it as carried over.
     pub continuation: bool,
@@ -47,11 +55,14 @@ pub fn bucket_by_date(
         let stop = last.min(end.pred_opt().unwrap_or(end));
         while day <= stop {
             buckets.entry(day).or_default().push(EventView {
+                calendar_id: row.calendar_id.clone(),
+                id: row.id.clone(),
                 summary: row.summary.clone(),
                 color,
                 all_day: row.all_day,
                 start_utc: if row.all_day { None } else { row.start_utc },
                 end_utc: if row.all_day { None } else { row.end_utc },
+                dates: row.all_day.then_some((first, last)),
                 continuation: day != first,
             });
             let Some(next) = day.checked_add_days(Days::new(1)) else {
@@ -131,6 +142,7 @@ mod tests {
     fn all_day(summary: &str, start: NaiveDate, end: NaiveDate) -> EventRow {
         EventRow {
             calendar_id: "cal-1".into(),
+            id: summary.into(),
             summary: summary.into(),
             start_utc: None,
             end_utc: None,
@@ -144,6 +156,7 @@ mod tests {
     fn timed(summary: &str, start: i64, end: i64) -> EventRow {
         EventRow {
             calendar_id: "cal-1".into(),
+            id: summary.into(),
             summary: summary.into(),
             start_utc: Some(start),
             end_utc: Some(end),

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{Days, Local, NaiveDate};
+use chrono::{Local, NaiveDate};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -10,19 +10,11 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::data::EventView;
 use crate::theme;
-use crate::ui::render::{event_line, overflow_line};
+use crate::ui::render::{event_line, highlight, overflow_line};
 use crate::ui::timegrid::{self, GUTTER_WIDTH, SlotWindow};
 
 /// Rows of all-day events shown above the grid before they're summarised.
 const ALL_DAY_ROWS: usize = 2;
-
-pub fn visible_range(app: &App) -> (NaiveDate, NaiveDate) {
-    let end = app
-        .selected
-        .checked_add_days(Days::new(1))
-        .unwrap_or(NaiveDate::MAX);
-    (app.selected, end)
-}
 
 pub fn draw(
     frame: &mut Frame,
@@ -34,7 +26,7 @@ pub fn draw(
     let today_events = events.get(&app.selected).unwrap_or(&empty);
 
     let (band, grid) = split_all_day_band(area, today_events);
-    draw_all_day_band(frame, band, today_events);
+    draw_all_day_band(frame, band, today_events, app.cursor_index_on(app.selected));
     if grid.height == 0 {
         return;
     }
@@ -46,13 +38,15 @@ pub fn draw(
     let [gutter, column] =
         Layout::horizontal([Constraint::Length(GUTTER_WIDTH), Constraint::Min(0)]).areas(grid);
 
-    timegrid::draw_gutter(frame, gutter, window);
+    timegrid::draw_gutter(frame, gutter, window, app.clock);
     timegrid::draw_day_column(
         frame,
         column,
         today_events,
         window,
         app.selected == Local::now().date_naive(),
+        app.cursor_index_on(app.selected),
+        app.clock,
     );
 }
 
@@ -67,7 +61,12 @@ pub fn split_all_day_band(area: Rect, events: &[EventView]) -> (Rect, Rect) {
     (band, grid)
 }
 
-pub fn draw_all_day_band(frame: &mut Frame, area: Rect, events: &[EventView]) {
+pub fn draw_all_day_band(
+    frame: &mut Frame,
+    area: Rect,
+    events: &[EventView],
+    cursor: Option<usize>,
+) {
     if area.height == 0 {
         return;
     }
@@ -81,10 +80,20 @@ pub fn draw_all_day_band(frame: &mut Frame, area: Rect, events: &[EventView]) {
     } else {
         capacity.saturating_sub(1)
     };
+    // All-day events sort first, so a cursor index below their count is on
+    // one of them and indexes the band directly.
     let mut lines: Vec<Line> = all_day
         .iter()
         .take(shown)
-        .map(|event| event_line(event, width, base))
+        .enumerate()
+        .map(|(index, event)| {
+            let line = event_line(event, width, base);
+            if cursor == Some(index) {
+                highlight(line)
+            } else {
+                line
+            }
+        })
         .collect();
     if shown < all_day.len() {
         lines.push(overflow_line(all_day.len() - shown, width));
@@ -97,7 +106,12 @@ pub fn draw_all_day_band(frame: &mut Frame, area: Rect, events: &[EventView]) {
 fn scroll_for(app: &App, events: &[EventView], rows: u16) -> u32 {
     match app.grid_scroll {
         Some(first) => timegrid::clamp_scroll(first, rows),
-        None => timegrid::initial_scroll(events, app.selected, rows),
+        None => timegrid::initial_scroll(
+            events,
+            app.cursor_index_on(app.selected),
+            app.selected,
+            rows,
+        ),
     }
 }
 

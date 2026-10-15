@@ -10,24 +10,12 @@ use ratatui::widgets::Paragraph;
 use crate::app::App;
 use crate::data::EventView;
 use crate::theme;
-use crate::ui::render::{WEEKDAYS_LONG, day_number_style, event_line};
+use crate::ui::render::{WEEKDAYS_LONG, day_number_style, event_line, highlight};
 use crate::ui::timegrid::{self, GUTTER_WIDTH, SlotWindow};
 
 const DAYS: usize = 7;
 /// One row of all-day events per day, above the grid.
 const ALL_DAY_ROWS: u16 = 1;
-
-pub fn visible_range(app: &App) -> (NaiveDate, NaiveDate) {
-    let weekday = u64::from(app.selected.weekday().num_days_from_sunday());
-    let start = app
-        .selected
-        .checked_sub_days(Days::new(weekday))
-        .unwrap_or(app.selected);
-    let end = start
-        .checked_add_days(Days::new(DAYS as u64))
-        .unwrap_or(NaiveDate::MAX);
-    (start, end)
-}
 
 pub fn draw(
     frame: &mut Frame,
@@ -35,7 +23,7 @@ pub fn draw(
     app: &App,
     events: &BTreeMap<NaiveDate, Vec<EventView>>,
 ) {
-    let (start, _) = visible_range(app);
+    let (start, _) = app.visible_range();
     let today = Local::now().date_naive();
     let empty = Vec::new();
 
@@ -72,7 +60,12 @@ pub fn draw(
     for (index, (date, day_events)) in days.iter().enumerate() {
         draw_header(frame, header_cells[index], *date, app.selected, today);
         if band_rows > 0 {
-            draw_all_day(frame, band_cells[index], day_events);
+            draw_all_day(
+                frame,
+                band_cells[index],
+                day_events,
+                app.cursor_index_on(*date),
+            );
         }
     }
 
@@ -83,10 +76,18 @@ pub fn draw(
         first: scroll_for(app, &days, grid.height),
         rows: grid.height,
     };
-    timegrid::draw_gutter(frame, gutter, window);
+    timegrid::draw_gutter(frame, gutter, window, app.clock);
 
     for (index, (date, day_events)) in days.iter().enumerate() {
-        timegrid::draw_day_column(frame, grid_cells[index], day_events, window, *date == today);
+        timegrid::draw_day_column(
+            frame,
+            grid_cells[index],
+            day_events,
+            window,
+            *date == today,
+            app.cursor_index_on(*date),
+            app.clock,
+        );
     }
 }
 
@@ -108,7 +109,7 @@ fn draw_header(
     );
 }
 
-fn draw_all_day(frame: &mut Frame, area: Rect, events: &[EventView]) {
+fn draw_all_day(frame: &mut Frame, area: Rect, events: &[EventView], cursor: Option<usize>) {
     if area.height == 0 {
         return;
     }
@@ -128,6 +129,14 @@ fn draw_all_day(frame: &mut Frame, area: Rect, events: &[EventView]) {
     } else {
         event_line(first, width, base)
     };
+    // All-day events sort first, so any cursor inside their count is on one of
+    // them — including one collapsed into the `+N`, which the single row can
+    // only acknowledge by highlighting itself.
+    let line = if cursor.is_some_and(|index| index < all_day.len()) {
+        highlight(line)
+    } else {
+        line
+    };
     frame.render_widget(Paragraph::new(vec![line]), area);
 }
 
@@ -135,10 +144,17 @@ fn scroll_for(app: &App, days: &[(NaiveDate, &Vec<EventView>)], rows: u16) -> u3
     if let Some(first) = app.grid_scroll {
         return timegrid::clamp_scroll(first, rows);
     }
-    // Open on the earliest event anywhere in the week, so a column isn't
+    // One window is shared by all seven columns, so a cursor settles it: the
+    // event it is on has to be the one on screen.
+    if let Some(on) = app.cursor_date()
+        && let Some((date, events)) = days.iter().find(|(date, _)| *date == on)
+    {
+        return timegrid::initial_scroll(events, app.cursor_index_on(on), *date, rows);
+    }
+    // Otherwise the earliest event anywhere in the week, so no column opens
     // scrolled past its own first meeting.
     days.iter()
-        .map(|(date, events)| timegrid::initial_scroll(events, *date, rows))
+        .map(|(date, events)| timegrid::initial_scroll(events, None, *date, rows))
         .min()
-        .unwrap_or_else(|| timegrid::initial_scroll(&[], app.selected, rows))
+        .unwrap_or_else(|| timegrid::initial_scroll(&[], None, app.selected, rows))
 }
