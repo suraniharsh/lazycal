@@ -4,11 +4,25 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    # Minor and patch bumps arrive as a single reviewable pull request.
+    # Majors are deliberately left out of the group so each one gets its own
+    # pull request: `dirs` 6 -> 7 reached main inside a batch and broke the
+    # build, which a lone, labelled pull request would have made obvious.
     groups:
       cargo-minor-and-patch:
+        applies-to: version-updates
+        patterns: ["*"]
         update-types: [minor, patch]
+    labels: [dependencies, rust]
+    open-pull-requests-limit: 5
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: monthly
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+    labels: [dependencies, github-actions]

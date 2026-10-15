@@ -30,6 +30,36 @@ jobs:
       - name: Test
         run: cargo test --all-targets
 
+      # Catches broken intra-doc links, which nothing else here would.
+      - name: Check the docs build
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # A calendar is all date arithmetic, so the suite is run where the local
+  # clock is awkward: either side of UTC, across the day boundary, and in the
+  # half- and quarter-hour offsets that catch assumptions about whole hours.
+  timezones:
+    name: test in ${{ matrix.tz }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tz:
+          - UTC
+          - Asia/Kolkata # +05:30
+          - Pacific/Chatham # +12:45
+          - Pacific/Kiritimati # +14:00, the first date on earth
+          - Pacific/Midway # -11:00, the last
+          - America/Los_Angeles # observes daylight saving
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-targets
+        env:
+          TZ: ${{ matrix.tz }}
+
   msrv:
     name: build on MSRV
     runs-on: ubuntu-latest
